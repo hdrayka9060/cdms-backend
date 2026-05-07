@@ -1,0 +1,54 @@
+import { Controller, Get, Patch, Body, UseGuards } from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { SettingsService } from './settings.service';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { UserRole } from '../users/schemas/user.schema';
+
+@ApiTags('Settings')
+@ApiBearerAuth('access-token')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Controller({ path: 'settings', version: '1' })
+export class SettingsController {
+  constructor(private readonly service: SettingsService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'Get dealership settings', description: 'Returns current dealership configuration including contact info, business hours, and notification preferences.' })
+  @ApiResponse({ status: 200, description: 'Settings returned' })
+  async get() {
+    const settings = await this.service.get();
+    return { message: 'Settings retrieved', data: settings };
+  }
+
+  @Patch()
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Update dealership settings',
+    description: `Admin only. Update any dealership settings fields.
+
+**Updatable fields:**
+- dealershipName, logo, address, city, state, zipCode, country, phone, email, website
+- taxId, licenseNumber, currency, language, primaryColor
+- businessHours (object with day keys)`,
+  })
+  @ApiResponse({ status: 200, description: 'Settings updated' })
+  async update(@Body() dto: any) {
+    const settings = await this.service.update(dto);
+    return { message: 'Settings updated', data: settings };
+  }
+
+  @Patch('notifications')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Update notification preferences',
+    description: `Admin only. Toggle notification channels.
+
+**Body:** \`{ emailNotifications, smsNotifications, leadAlerts, paymentAlerts, supportAlerts }\` (all boolean)`,
+  })
+  @ApiResponse({ status: 200, description: 'Notifications updated' })
+  async updateNotifications(@Body() dto: Record<string, boolean>) {
+    const settings = await this.service.updateNotifications(dto);
+    return { message: 'Notifications updated', data: settings };
+  }
+}
