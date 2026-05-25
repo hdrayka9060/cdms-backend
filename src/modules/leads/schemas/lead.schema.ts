@@ -110,3 +110,7 @@ LeadSchema.index({ status: 1, source: 1 });
 LeadSchema.index({ assignedTo: 1 });
 LeadSchema.index({ buyer: 1 });
 LeadSchema.index({ vehicle: 1 });
+LeadSchema.index(
+  { buyer: 1, vehicle: 1 },
+  { unique: true, partialFilterExpression: { isDeleted: false } }
+);

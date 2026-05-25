@@ -126,8 +126,7 @@ export class LeadsService {
     }).select('_id status');
     if (dupe) {
       throw new ConflictException(
-        `A lead for this buyer and vehicle already exists (status: ${dupe.status}). ` +
-        `Archive it first before opening a new one.`,
+        `A lead already exists for this buyer and vehicle. Archive the existing lead (status: ${dupe.status}) to create a new one.`,
       );
     }
 
