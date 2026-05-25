@@ -13,10 +13,10 @@ import {
 import { InventoryService } from './inventory.service';
 import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto } from './dto/vehicle.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
-import { Roles } from '../../common/decorators/roles.decorator';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { UserRole } from '../users/schemas/user.schema';
+import { AppModule, PermissionAction } from '../../common/permissions';
 
 const imageStorage = diskStorage({
   destination: './uploads/vehicles',
@@ -25,7 +25,7 @@ const imageStorage = diskStorage({
 
 @ApiTags('Inventory')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'inventory', version: '1' })
 export class InventoryController {
   constructor(private readonly inventoryService: InventoryService) {}
@@ -40,7 +40,7 @@ export class InventoryController {
 
 **Required Fields:** vehicleNumber, title, company, model, year, price
 
-**Optional Fields:** description, kmDriven, discountPercent, ownerCount, fuelType, transmission, color, vin, status, hosting, features`,
+**Optional Fields:** vehicleNumber (auto-generated if omitted), description, km, discount, owners, fuelType, transmission, color, vin, bodyType, status, hosting, features`,
   })
   @ApiResponse({ status: 201, description: 'Vehicle created successfully' })
   @ApiResponse({ status: 409, description: 'Vehicle number already exists' })
@@ -116,7 +116,7 @@ export class InventoryController {
    * DELETE /api/v1/inventory/:id
    */
   @Delete(':id')
-  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete vehicle (soft)', description: 'Soft-deletes vehicle. Admin/Manager only.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
@@ -144,10 +144,27 @@ export class InventoryController {
   }
 
   /**
+   * DELETE /api/v1/inventory/:id/images
+   * Body: { photoPath: "/uploads/vehicles/<filename>" }
+   */
+  @Delete(':id/images')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Delete a vehicle image',
+    description: 'Removes a photo path from the vehicle\'s photos[] array. The file on disk is left untouched (cleanup is a separate concern).',
+  })
+  @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
+  @ApiBody({ description: 'Photo path to remove', schema: { type: 'object', properties: { photoPath: { type: 'string', example: '/uploads/vehicles/abc.jpg' } } } })
+  async removeImage(@Param('id') id: string, @Body() body: { photoPath: string }) {
+    const vehicle = await this.inventoryService.removeImage(id, body.photoPath);
+    return { message: 'Image removed', data: vehicle };
+  }
+
+  /**
    * POST /api/v1/inventory/bulk-upload
    */
   @Post('bulk-upload')
-  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
   @UseInterceptors(FileInterceptor('file', { storage: memoryStorage() }))
   @ApiConsumes('multipart/form-data')
   @ApiBody({ description: 'CSV file with vehicle data', schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } } })
@@ -155,7 +172,7 @@ export class InventoryController {
     summary: 'Bulk upload vehicles via CSV',
     description: `Uploads a CSV file to create multiple vehicles at once.
 
-**CSV Columns:** vehicleNumber, title, company, model, year, price, kmDriven, discountPercent, ownerCount, fuelType, transmission, color, description, vin
+**CSV Columns:** vehicleNumber (optional), title, company, model, year, price, km, discount, owners, fuelType, transmission, color, description, vin, bodyType
 
 **Notes:**
 - Skip existing vehicle numbers

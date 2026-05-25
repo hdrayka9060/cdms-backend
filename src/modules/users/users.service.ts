@@ -46,17 +46,21 @@ export class UsersService {
       this.userModel.countDocuments(filter),
     ]);
 
-    return new PaginatedResult(data as UserDocument[], total, page, limit);
+    return new PaginatedResult(data as unknown as UserDocument[], total, page, limit);
   }
 
   async findById(id: string): Promise<UserDocument> {
-    const user = await this.userModel.findOne({ _id: id, isDeleted: false });
+    const user = await this.userModel
+      .findOne({ _id: id, isDeleted: false })
+      .populate('roleId');
     if (!user) throw new NotFoundException('User not found');
     return user;
   }
 
   async findByEmail(email: string, includePassword = false): Promise<UserDocument | null> {
-    const query = this.userModel.findOne({ email: email.toLowerCase(), isDeleted: false });
+    const query = this.userModel
+      .findOne({ email: email.toLowerCase(), isDeleted: false })
+      .populate('roleId');
     if (includePassword) query.select('+password +refreshToken');
     return query.exec();
   }

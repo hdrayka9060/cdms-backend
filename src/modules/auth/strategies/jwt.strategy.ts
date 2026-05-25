@@ -17,7 +17,8 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     });
   }
 
-  async validate(payload: { sub: string; email: string; role: string }) {
+  async validate(payload: { sub: string; email: string }) {
+    // findById populates `roleId` so guards can read `req.user.roleId.permissions`.
     const user = await this.usersService.findById(payload.sub);
     return user;
   }

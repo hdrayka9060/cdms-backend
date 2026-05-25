@@ -29,7 +29,7 @@ export class CalendarService {
       this.model.find(filter).sort(sortObj).skip(skip).limit(limit).populate('assignedTo', 'firstName lastName').populate('vehicle', 'title vehicleNumber').lean(),
       this.model.countDocuments(filter),
     ]);
-    return new PaginatedResult(data as CalendarEventDocument[], total, page, limit);
+    return new PaginatedResult(data as unknown as CalendarEventDocument[], total, page, limit);
   }
 
   async findById(id: string): Promise<CalendarEventDocument> {

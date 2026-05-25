@@ -2,36 +2,50 @@ import {
   Injectable,
   UnauthorizedException,
   BadRequestException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { UsersService } from '../users/users.service';
+import { RolesService } from '../roles/roles.service';
 import { RegisterDto, LoginDto, RefreshTokenDto, ForgotPasswordDto, ResetPasswordDto } from './dto/auth.dto';
-import { UserRole } from '../users/schemas/user.schema';
 
 @Injectable()
 export class AuthService {
   constructor(
     private usersService: UsersService,
+    private rolesService: RolesService,
     private jwtService: JwtService,
     private configService: ConfigService,
   ) {}
 
   async register(dto: RegisterDto) {
+    // First user signed up via /auth/register is always assigned the seeded "Admin" role.
+    // (Other staff are created via POST /users by an admin, with an explicit roleId.)
+    const adminRole = await this.rolesService.findByName('Admin');
+    if (!adminRole) {
+      throw new ServiceUnavailableException(
+        'System not initialized — default roles missing. Please restart the server.',
+      );
+    }
+
     const user = await this.usersService.create({
       firstName: dto.firstName,
       lastName: dto.lastName,
       email: dto.email,
       password: dto.password,
-      role: UserRole.ADMIN,
+      roleId: adminRole._id.toString(),
     });
 
-    const tokens = await this.generateTokens(user._id.toString(), user.email, user.role);
-    await this.usersService.setRefreshToken(user._id.toString(), tokens.refreshToken);
+    // Re-fetch with populated role so the response includes role details.
+    const populated = await this.usersService.findById(user._id.toString());
 
-    const { password, ...userData } = (user as any).toObject();
+    const tokens = await this.generateTokens(populated._id.toString(), populated.email);
+    await this.usersService.setRefreshToken(populated._id.toString(), tokens.refreshToken);
+
+    const { password, ...userData } = (populated as any).toObject();
     return { user: userData, ...tokens };
   }
 
@@ -46,7 +60,7 @@ export class AuthService {
       throw new UnauthorizedException('Account is inactive or suspended');
     }
 
-    const tokens = await this.generateTokens(user._id.toString(), user.email, user.role);
+    const tokens = await this.generateTokens(user._id.toString(), user.email);
     await this.usersService.setRefreshToken(user._id.toString(), tokens.refreshToken);
 
     const { password, refreshToken, ...userData } = (user as any).toObject();
@@ -63,7 +77,7 @@ export class AuthService {
       if (!valid) throw new UnauthorizedException('Invalid refresh token');
 
       const user = await this.usersService.findById(payload.sub);
-      const tokens = await this.generateTokens(user._id.toString(), user.email, user.role);
+      const tokens = await this.generateTokens(user._id.toString(), user.email);
       await this.usersService.setRefreshToken(user._id.toString(), tokens.refreshToken);
 
       return tokens;
@@ -102,8 +116,11 @@ export class AuthService {
     return { message: 'Password reset successfully. Please log in.' };
   }
 
-  private async generateTokens(userId: string, email: string, role: string) {
-    const payload = { sub: userId, email, role };
+  private async generateTokens(userId: string, email: string) {
+    // Note: role/permissions are NOT embedded in the JWT — they're re-loaded from the
+    // DB on every request by JwtStrategy.validate(). This keeps permissions fresh after
+    // role edits (at the cost of a populate per request, fine at our scale).
+    const payload = { sub: userId, email };
 
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(payload, {

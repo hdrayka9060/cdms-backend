@@ -31,12 +31,17 @@ Supports same query params as private inventory: page, limit, search, company, m
    */
   @Get('inventory/:id')
   @Public()
-  @ApiOperation({ summary: 'Public vehicle detail', description: 'No auth required. Returns full vehicle details for a public listing.' })
+  @ApiOperation({
+    summary: 'Public vehicle detail',
+    description: 'No auth required. Returns full vehicle details + increments the public view counter (used as a marketing signal). Internal admin views do NOT count.',
+  })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 200, description: 'Vehicle details returned' })
   @ApiResponse({ status: 404, description: 'Vehicle not found' })
   async getPublicVehicle(@Param('id') id: string) {
     const vehicle = await this.inventoryService.findById(id);
+    // Public traffic counts; fire and forget so a counter failure doesn't 500 the page.
+    this.inventoryService.incrementViews(id).catch(() => {});
     return { message: 'Vehicle details', data: vehicle };
   }
 

@@ -9,14 +9,14 @@ import { UsersService } from './users.service';
 import { CreateUserDto, UpdateUserDto, ChangePasswordDto } from './dto/user.dto';
 import { PaginationDto } from '../../common/dto/pagination.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
-import { Roles } from '../../common/decorators/roles.decorator';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { UserRole } from './schemas/user.schema';
+import { AppModule, PermissionAction } from '../../common/permissions';
 
 @ApiTags('Users')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'users', version: '1' })
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
@@ -26,8 +26,8 @@ export class UsersController {
    * Create a new user (admin only)
    */
   @Post()
-  @Roles(UserRole.ADMIN)
-  @ApiOperation({ summary: 'Create a new system user', description: 'Admin only. Creates a new user with a specified role.' })
+  @RequirePermission(AppModule.STAFF, PermissionAction.EDIT)
+  @ApiOperation({ summary: 'Create a new system user', description: 'Requires Staff:edit. Creates a new user with a specified roleId.' })
   @ApiResponse({ status: 201, description: 'User created successfully' })
   @ApiResponse({ status: 409, description: 'Email already registered' })
   async create(@Body() dto: CreateUserDto) {
@@ -41,8 +41,8 @@ export class UsersController {
    * List all users with pagination
    */
   @Get()
-  @Roles(UserRole.ADMIN, UserRole.MANAGER)
-  @ApiOperation({ summary: 'List all users', description: 'Returns paginated list of all users. Admin/Manager only.' })
+  @RequirePermission(AppModule.STAFF, PermissionAction.VIEW)
+  @ApiOperation({ summary: 'List all users', description: 'Returns paginated list of all users. Requires Staff:view.' })
   @ApiResponse({ status: 200, description: 'Users retrieved successfully' })
   async findAll(@Query() query: PaginationDto) {
     const result = await this.usersService.findAll(query);
@@ -66,7 +66,7 @@ export class UsersController {
    * Get a user by ID
    */
   @Get(':id')
-  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @RequirePermission(AppModule.STAFF, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get user by ID' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the user' })
   @ApiResponse({ status: 200, description: 'User found' })
@@ -85,8 +85,10 @@ export class UsersController {
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the user' })
   @ApiResponse({ status: 200, description: 'User updated successfully' })
   async update(@Param('id') id: string, @Body() dto: UpdateUserDto, @CurrentUser() currentUser: any) {
-    // Non-admins can only update themselves
-    if (currentUser.role !== UserRole.ADMIN && currentUser._id.toString() !== id) {
+    // Non-admins can only update themselves.
+    // (currentUser.roleId is the populated Role doc when JwtStrategy.validate ran.)
+    const isAdmin = currentUser.roleId?.name === 'Admin';
+    if (!isAdmin && currentUser._id.toString() !== id) {
       throw new ForbiddenException('You can only update your own profile');
     }
     const user = await this.usersService.update(id, dto);
@@ -112,9 +114,9 @@ export class UsersController {
    * Soft delete a user (admin only)
    */
   @Delete(':id')
-  @Roles(UserRole.ADMIN)
+  @RequirePermission(AppModule.STAFF, PermissionAction.DELETE)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Soft delete a user', description: 'Admin only. Marks user as deleted without removing from DB.' })
+  @ApiOperation({ summary: 'Soft delete a user', description: 'Requires Staff:delete. Marks user as deleted without removing from DB.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId of the user' })
   @ApiResponse({ status: 200, description: 'User deleted successfully' })
   async remove(@Param('id') id: string) {

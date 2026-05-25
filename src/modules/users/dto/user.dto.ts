@@ -1,8 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
-  IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, MinLength, Matches,
+  IsEmail, IsMongoId, IsNotEmpty, IsOptional, IsString, MinLength, Matches,
 } from 'class-validator';
-import { UserRole } from '../schemas/user.schema';
 
 export class CreateUserDto {
   @ApiProperty({ example: 'John' })
@@ -22,10 +21,10 @@ export class CreateUserDto {
   })
   password: string;
 
-  @ApiPropertyOptional({ enum: UserRole, default: UserRole.SALES_AGENT })
+  @ApiPropertyOptional({ description: 'Role ObjectId (ref: Role). Required for user creation via /users; defaults to seeded "Sales Staff" if omitted.' })
   @IsOptional()
-  @IsEnum(UserRole)
-  role?: UserRole;
+  @IsMongoId()
+  roleId?: string;
 
   @ApiPropertyOptional({ example: '+1234567890' })
   @IsOptional() @IsString() phone?: string;
@@ -37,7 +36,7 @@ export class CreateUserDto {
 export class UpdateUserDto {
   @ApiPropertyOptional() @IsOptional() @IsString() firstName?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() lastName?: string;
-  @ApiPropertyOptional({ enum: UserRole }) @IsOptional() @IsEnum(UserRole) role?: UserRole;
+  @ApiPropertyOptional({ description: 'Role ObjectId (ref: Role)' }) @IsOptional() @IsMongoId() roleId?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() phone?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() department?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() avatar?: string;

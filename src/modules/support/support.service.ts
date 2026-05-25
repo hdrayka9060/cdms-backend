@@ -30,7 +30,7 @@ export class SupportService {
       this.model.find(filter).sort(sortObj).skip(skip).limit(limit).populate('assignedTo', 'firstName lastName').lean(),
       this.model.countDocuments(filter),
     ]);
-    return new PaginatedResult(data as TicketDocument[], total, page, limit);
+    return new PaginatedResult(data as unknown as TicketDocument[], total, page, limit);
   }
 
   async findById(id: string): Promise<TicketDocument> {

@@ -45,7 +45,7 @@ export class BhphService {
     if (status) filter.status = status;
     const sortObj: any = sort.startsWith('-') ? { [sort.slice(1)]: -1 } : { [sort]: 1 };
     const [data, total] = await Promise.all([this.model.find(filter).sort(sortObj).skip(skip).limit(limit).populate('vehicle', 'title vehicleNumber').lean(), this.model.countDocuments(filter)]);
-    return new PaginatedResult(data as LoanDocument[], total, page, limit);
+    return new PaginatedResult(data as unknown as LoanDocument[], total, page, limit);
   }
 
   async findById(id: string): Promise<{ loan: LoanDocument; schedule: any[] }> {

@@ -1,5 +1,7 @@
-import { Controller, Get, Post, Body, Query, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
+import {
+  Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, Patch, Post, Query, UseGuards,
+} from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AccountingService } from './accounting.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 
@@ -35,6 +37,23 @@ export class AccountingController {
     return { message: 'Sale recorded', data: sale };
   }
 
+  @Patch('sales/:id')
+  @ApiOperation({ summary: 'Edit a sale', description: 'Updates buyer, vehicle ref, prices, payment, etc.' })
+  @ApiParam({ name: 'id', description: 'Sale ObjectId' })
+  async updateSale(@Param('id') id: string, @Body() dto: any) {
+    const sale = await this.service.updateSale(id, dto);
+    return { message: 'Sale updated', data: sale };
+  }
+
+  @Delete('sales/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete a sale (soft)' })
+  @ApiParam({ name: 'id', description: 'Sale ObjectId' })
+  async removeSale(@Param('id') id: string) {
+    await this.service.removeSale(id);
+    return { message: 'Sale deleted', data: null };
+  }
+
   @Get('expenses')
   @ApiOperation({ summary: 'Get expense list', description: 'Paginated expense list. Filter by category.' })
   @ApiQuery({ name: 'category', required: false, enum: ['general', 'marketing', 'maintenance', 'staff', 'utilities', 'other'] })
@@ -49,6 +68,23 @@ export class AccountingController {
   async createExpense(@Body() dto: any) {
     const expense = await this.service.createExpense(dto);
     return { message: 'Expense added', data: expense };
+  }
+
+  @Patch('expenses/:id')
+  @ApiOperation({ summary: 'Edit an expense', description: 'Updates title, amount, date, category, vendor, or notes.' })
+  @ApiParam({ name: 'id', description: 'Expense ObjectId' })
+  async updateExpense(@Param('id') id: string, @Body() dto: any) {
+    const expense = await this.service.updateExpense(id, dto);
+    return { message: 'Expense updated', data: expense };
+  }
+
+  @Delete('expenses/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete an expense (soft)' })
+  @ApiParam({ name: 'id', description: 'Expense ObjectId' })
+  async removeExpense(@Param('id') id: string) {
+    await this.service.removeExpense(id);
+    return { message: 'Expense deleted', data: null };
   }
 
   @Get('profit-loss')

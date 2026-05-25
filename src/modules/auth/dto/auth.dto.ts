@@ -1,4 +1,4 @@
-import { IsEmail, IsNotEmpty, IsString, MinLength, Matches } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsOptional, IsString, MinLength, Matches } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class RegisterDto {
@@ -12,7 +12,7 @@ export class RegisterDto {
     message: 'Password too weak',
   })
   password: string;
-  @ApiPropertyOptional({ example: 'My Dealership LLC' }) @IsString() dealershipName?: string;
+  @ApiPropertyOptional({ example: 'My Dealership LLC' }) @IsOptional() @IsString() dealershipName?: string;
 }
 
 export class LoginDto {

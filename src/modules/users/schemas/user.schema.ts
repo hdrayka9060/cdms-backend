@@ -1,9 +1,13 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
+import { Document, Types } from 'mongoose';
 import { ApiProperty } from '@nestjs/swagger';
 
 export type UserDocument = User & Document;
 
+/**
+ * @deprecated Legacy flat-role enum. New users should use `roleId` (ObjectId ref Role).
+ * Kept only so the seeder migration can recognize legacy values on existing documents.
+ */
 export enum UserRole {
   ADMIN = 'admin',
   MANAGER = 'manager',
@@ -28,9 +32,20 @@ export class User {
 
   @Prop({ required: true, select: false }) password: string;
 
-  @ApiProperty({ enum: UserRole })
-  @Prop({ type: String, enum: UserRole, default: UserRole.SALES_AGENT })
-  role: UserRole;
+  /**
+   * Reference to a role document in the `roles` collection.
+   * Populated reads expose `{ _id, name, description, permissions[] }`.
+   */
+  @ApiProperty({ description: 'Role ObjectId (ref: Role)' })
+  @Prop({ type: Types.ObjectId, ref: 'Role' })
+  roleId: Types.ObjectId;
+
+  /**
+   * @deprecated Legacy string role enum. Read only — new code writes `roleId`.
+   * The roles seeder migrates and `$unset`s this field on boot.
+   */
+  @Prop({ type: String, enum: UserRole, required: false })
+  role?: UserRole;
 
   @ApiProperty({ enum: UserStatus })
   @Prop({ type: String, enum: UserStatus, default: UserStatus.ACTIVE })
@@ -64,5 +79,5 @@ UserSchema.virtual('fullName').get(function () {
 });
 
 // Index for fast lookups
-UserSchema.index({ email: 1 });
-UserSchema.index({ role: 1, status: 1 });
+// (Note: email gets a unique index via @Prop({ unique: true }) above; no explicit index here.)
+UserSchema.index({ roleId: 1, status: 1 });

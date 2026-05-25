@@ -220,7 +220,7 @@ page, limit, search, sort, status, company, model, minPrice, maxPrice, minYear, 
 
 **CSV bulk upload columns:**
 ```
-vehicleNumber, title, company, model, year, price, kmDriven, discountPercent, ownerCount, fuelType, transmission, color, description, vin
+vehicleNumber (optional, auto-generated), title, company, model, year, price, km, discount, owners, fuelType, transmission, color, description, vin, bodyType
 ```
 
 ---

@@ -4,7 +4,10 @@ import {
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiParam, ApiQuery, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsOptional } from 'class-validator';
 import { CrmSellersService } from './crm-sellers.service';
-import { CreateSellerLeadDto, UpdateSellerLeadDto, CommunicateDto, ScheduleInspectionDto } from './dto/seller-lead.dto';
+import {
+  CreateSellerLeadDto, UpdateSellerLeadDto, CommunicateDto, ScheduleInspectionDto,
+  SellerVehicleInputDto,
+} from './dto/seller-lead.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -23,10 +26,14 @@ export class CrmSellersController {
   constructor(private readonly service: CrmSellersService) {}
 
   @Post()
-  @ApiOperation({ summary: 'Create seller lead', description: 'Creates a new seller CRM lead (someone wanting to sell a vehicle).' })
+  @ApiOperation({
+    summary: 'Create seller lead',
+    description:
+      'Creates a new seller CRM lead. If `vehicles[]` is supplied, each entry is also created as a real Vehicle in the inventory and linked back on this seller.',
+  })
   @ApiResponse({ status: 201, description: 'Lead created' })
-  async create(@Body() dto: CreateSellerLeadDto) {
-    const lead = await this.service.create(dto);
+  async create(@Body() dto: CreateSellerLeadDto, @CurrentUser() user: any) {
+    const lead = await this.service.create(dto, user._id);
     return { message: 'Seller lead created', data: lead };
   }
 
@@ -57,11 +64,46 @@ export class CrmSellersController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update seller lead', description: 'Update stage, notes, assignee, or inspection date.' })
+  @ApiOperation({ summary: 'Update seller lead', description: 'Update contact, address, stage, notes, assignee, or inspection date.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
-  async update(@Param('id') id: string, @Body() dto: UpdateSellerLeadDto) {
-    const lead = await this.service.update(id, dto);
+  async update(@Param('id') id: string, @Body() dto: UpdateSellerLeadDto, @CurrentUser() user: any) {
+    const lead = await this.service.update(id, dto, user?._id);
     return { message: 'Lead updated', data: lead };
+  }
+
+  @Post(':id/vehicles')
+  @ApiOperation({
+    summary: 'Attach a new vehicle to a seller',
+    description:
+      'Creates the vehicle in inventory and links it to the seller. The vehicle will appear in /inventory and on the seller detail page.',
+  })
+  @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
+  @ApiResponse({ status: 201, description: 'Vehicle created and linked' })
+  async addVehicle(
+    @Param('id') id: string,
+    @Body() dto: SellerVehicleInputDto,
+    @CurrentUser() user: any,
+  ) {
+    const result = await this.service.addVehicle(id, dto, user._id);
+    return { message: 'Vehicle added to seller', data: result };
+  }
+
+  @Delete(':id/vehicles/:vehicleId')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Detach a vehicle from a seller',
+    description:
+      'Removes the link only; the vehicle itself stays in inventory. To delete the vehicle entirely, use DELETE /inventory/:id.',
+  })
+  @ApiParam({ name: 'id', description: 'Seller lead ObjectId' })
+  @ApiParam({ name: 'vehicleId', description: 'Vehicle ObjectId' })
+  async removeVehicle(
+    @Param('id') id: string,
+    @Param('vehicleId') vehicleId: string,
+    @CurrentUser() user: any,
+  ) {
+    const lead = await this.service.removeVehicle(id, vehicleId, user?._id);
+    return { message: 'Vehicle removed from seller', data: lead };
   }
 
   @Post(':id/inspection')
@@ -91,7 +133,10 @@ Message is stored in the communications log with timestamp and sender.`,
 
   @Delete(':id')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Delete seller lead (soft delete)' })
+  @ApiOperation({
+    summary: 'Delete seller lead (soft delete)',
+    description: 'Soft-deletes the seller. Linked inventory vehicles are NOT deleted — they remain in inventory.',
+  })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   async remove(@Param('id') id: string) {
     await this.service.remove(id);

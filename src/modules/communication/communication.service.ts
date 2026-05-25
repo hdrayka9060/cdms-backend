@@ -25,7 +25,7 @@ export class CommunicationService {
       this.model.find(filter).sort(sortObj).skip(skip).limit(limit).populate('sentBy', 'firstName lastName').populate('linkedVehicle', 'title vehicleNumber').lean(),
       this.model.countDocuments(filter),
     ]);
-    return new PaginatedResult(data as CommunicationLogDocument[], total, page, limit);
+    return new PaginatedResult(data as unknown as CommunicationLogDocument[], total, page, limit);
   }
 
   async getChannelStats(): Promise<any> {

@@ -1,15 +1,17 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, VersioningType } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
+import { join } from 'path';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['log', 'error', 'warn', 'debug'],
   });
 
@@ -20,8 +22,17 @@ async function bootstrap() {
     .get<string>('ALLOWED_ORIGINS', 'http://localhost:3000')
     .split(',');
 
+  // ── Static assets (uploaded vehicle images, ticket attachments) ──────────
+  // Reachable at http://localhost:3000/uploads/vehicles/<filename>.
+  // Note: helmet's crossOriginResourcePolicy default ("same-origin") would block the
+  // frontend from loading these from a different port; set to "cross-origin" below.
+  const uploadDest = configService.get<string>('UPLOAD_DEST', './uploads');
+  app.useStaticAssets(join(process.cwd(), uploadDest.replace(/^\.\//, '')), {
+    prefix: '/uploads/',
+  });
+
   // ── Security ──────────────────────────────────────────────────────────────
-  app.use(helmet());
+  app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.enableCors({
     origin: allowedOrigins,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
@@ -86,10 +97,12 @@ All responses follow the standard envelope:
     )
     .addTag('Auth', 'Authentication & authorization endpoints')
     .addTag('Users', 'User management & RBAC')
+    .addTag('Roles', 'Role definitions and permission matrix')
     .addTag('Dashboard', 'Summary stats and chart data')
     .addTag('Inventory', 'Vehicle inventory management')
     .addTag('CRM Sellers', 'Seller lead pipeline management')
     .addTag('CRM Buyers', 'Buyer lead & test-drive management')
+    .addTag('Leads', 'Sales lead pipeline (buyer × vehicle inquiries)')
     .addTag('Calendar', 'Scheduling & event management')
     .addTag('Accounting', 'Sales ledger, expenses & P&L')
     .addTag('BHPH', 'Buy Here Pay Here — dealer financing')

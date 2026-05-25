@@ -7,12 +7,21 @@ export type ExpenseDocument = Expense & Document;
 @Schema({ timestamps: true, collection: 'sales' })
 export class Sale {
   @Prop({ required: true }) vehicleTitle: string;
+  /** Vehicle ObjectId as a plain string. */
   @Prop({ required: true }) vehicleId: string;
   @Prop({ required: true }) buyerName: string;
   @Prop({ required: true }) buyerEmail: string;
+  /** Gross sale price (before discount). */
   @Prop({ required: true }) salePrice: number;
+  /** What the dealership paid for the car — used for profit calculation. */
   @Prop({ default: 0 }) costPrice: number;
+  /** Discount applied off `salePrice`. Net = salePrice - discount. */
   @Prop({ default: 0 }) discount: number;
+  /**
+   * How much of the net the buyer has actually paid. Drives the outstanding
+   * KPI:  outstanding = (salePrice - discount) - amountPaid when status≠paid.
+   */
+  @Prop({ default: 0 }) amountPaid: number;
   @Prop({ required: true }) saleDate: Date;
   @Prop({ default: 'cash', enum: ['cash', 'finance', 'bhph', 'trade_in'] }) paymentMethod: string;
   @Prop({ default: 'paid', enum: ['paid', 'pending', 'partial'] }) paymentStatus: string;

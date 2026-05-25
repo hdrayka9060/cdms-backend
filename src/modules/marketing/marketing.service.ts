@@ -18,7 +18,7 @@ export class MarketingService {
     if (platform) filter.platform = platform;
     const sortObj: any = sort.startsWith('-') ? { [sort.slice(1)]: -1 } : { [sort]: 1 };
     const [data, total] = await Promise.all([this.model.find(filter).sort(sortObj).skip(skip).limit(limit).lean(), this.model.countDocuments(filter)]);
-    return new PaginatedResult(data as CampaignDocument[], total, page, limit);
+    return new PaginatedResult(data as unknown as CampaignDocument[], total, page, limit);
   }
 
   async findById(id: string): Promise<CampaignDocument> {

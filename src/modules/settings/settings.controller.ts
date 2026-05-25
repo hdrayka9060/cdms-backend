@@ -2,13 +2,13 @@ import { Controller, Get, Patch, Body, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { SettingsService } from './settings.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
-import { Roles } from '../../common/decorators/roles.decorator';
-import { UserRole } from '../users/schemas/user.schema';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { AppModule, PermissionAction } from '../../common/permissions';
 
 @ApiTags('Settings')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'settings', version: '1' })
 export class SettingsController {
   constructor(private readonly service: SettingsService) {}
@@ -22,7 +22,7 @@ export class SettingsController {
   }
 
   @Patch()
-  @Roles(UserRole.ADMIN)
+  @RequirePermission(AppModule.SETTINGS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Update dealership settings',
     description: `Admin only. Update any dealership settings fields.
@@ -39,7 +39,7 @@ export class SettingsController {
   }
 
   @Patch('notifications')
-  @Roles(UserRole.ADMIN)
+  @RequirePermission(AppModule.SETTINGS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Update notification preferences',
     description: `Admin only. Toggle notification channels.

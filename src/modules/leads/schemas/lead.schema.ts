@@ -1,0 +1,112 @@
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
+
+export type LeadDocument = Lead & Document;
+
+export enum LeadSource {
+  WEBSITE = 'website',
+  GOOGLE_ADS = 'google_ads',
+  META_ADS = 'meta_ads',
+  REFERRAL = 'referral',
+  WALK_IN = 'walk_in',
+}
+
+export enum LeadStatus {
+  NEW = 'new',
+  CONTACTED = 'contacted',
+  TEST_DRIVE = 'test_drive',
+  NEGOTIATION = 'negotiation',
+  CLOSED = 'closed',
+  /**
+   * Terminal "no action needed" state. Set when a vehicle is sold to another
+   * buyer (auto-archive of sibling inquiries), when a sale is reverted (the
+   * previously-closed lead lands here instead of being deleted, so the audit
+   * trail survives), or manually by staff to retire a stale inquiry.
+   * Previously named "dropped".
+   */
+  ARCHIVED = 'archived',
+}
+
+export enum LeadChannel {
+  CALL = 'call',
+  EMAIL = 'email',
+  WHATSAPP = 'whatsapp',
+  SMS = 'sms',
+  /** Walk-in / in-person / face-to-face — anything without a digital channel. */
+  OFFLINE = 'offline',
+}
+
+@Schema({ timestamps: true, collection: 'leads' })
+export class Lead {
+  @Prop({ type: Types.ObjectId, ref: 'BuyerLead', required: true })
+  buyer: Types.ObjectId;
+
+  @Prop({ type: Types.ObjectId, ref: 'Vehicle', required: true })
+  vehicle: Types.ObjectId;
+
+  @Prop({ type: String, enum: LeadSource, required: true })
+  source: LeadSource;
+
+  @Prop({ type: String, enum: LeadStatus, default: LeadStatus.NEW })
+  status: LeadStatus;
+
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  assignedTo: Types.ObjectId;
+
+  @Prop({ default: '' })
+  notes: string;
+
+  /**
+   * Price the buyer asked / offered for the vehicle. Setting it advances the
+   * lead pipeline to "negotiation" (handled in LeadsService.update).
+   */
+  @Prop({ default: 0, min: 0 })
+  askedPrice: number;
+
+  @Prop({
+    type: [{ date: Date, action: String, by: String }],
+    default: [],
+  })
+  timeline: { date: Date; action: string; by: string }[];
+
+  /**
+   * Communication log — one entry per interaction (call / email / whatsapp /
+   * sms / offline). Each entry can optionally reference a Vehicle the comm
+   * was about and the staff member who performed it.
+   *
+   * Every subfield uses the explicit `{ type: X }` form so Mongoose doesn't
+   * misread the inline shorthand around `vehicle` / `byStaff` refs.
+   */
+  @Prop({
+    type: [{
+      date: { type: Date, default: Date.now },
+      channel: { type: String, enum: LeadChannel, required: true },
+      summary: { type: String, default: '' },
+      vehicle: { type: Types.ObjectId, ref: 'Vehicle' },
+      vehicleTitle: { type: String },
+      byStaff: { type: Types.ObjectId, ref: 'User' },
+    }],
+    default: [],
+  })
+  log: {
+    _id?: Types.ObjectId;
+    date: Date;
+    channel: LeadChannel;
+    summary: string;
+    vehicle?: Types.ObjectId;
+    vehicleTitle?: string;
+    byStaff?: Types.ObjectId;
+  }[];
+
+  @Prop({ default: false })
+  isDeleted: boolean;
+
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export const LeadSchema = SchemaFactory.createForClass(Lead);
+LeadSchema.index({ status: 1, source: 1 });
+LeadSchema.index({ assignedTo: 1 });
+LeadSchema.index({ buyer: 1 });
+LeadSchema.index({ vehicle: 1 });
