@@ -7,12 +7,14 @@ import {
 } from './dto/buyer-lead.dto';
 import { PaginationDto, PaginatedResult } from '../../common/dto/pagination.dto';
 import { Vehicle, VehicleDocument } from '../inventory/schemas/vehicle.schema';
+import { ActivityService } from '../activity/activity.service';
 
 @Injectable()
 export class CrmBuyersService {
   constructor(
     @InjectModel(BuyerLead.name) private model: Model<BuyerLeadDocument>,
     @InjectModel(Vehicle.name) private vehicleModel: Model<VehicleDocument>,
+    private readonly activity: ActivityService,
   ) {}
 
   /**
@@ -102,7 +104,14 @@ export class CrmBuyersService {
       stage: dto.stage ?? BuyerLeadStage.NEW,
       interestedVehicles: [...ids].map((id) => new Types.ObjectId(id)),
     }).save();
-
+    await this.activity.log({
+      module: 'crm-buyers',
+      action: 'created',
+      entity: 'Buyer',
+      entityId: doc._id,
+      label: `${doc.buyerName} (${doc.buyerEmail ?? 'no email'})`,
+      meta: { stage: doc.stage },
+    });
     return this.findById(String(doc._id));
   }
 
@@ -144,6 +153,14 @@ export class CrmBuyersService {
       { new: true },
     );
     if (!lead) throw new NotFoundException('Buyer lead not found');
+    await this.activity.log({
+      module: 'crm-buyers',
+      action: 'updated',
+      entity: 'Buyer',
+      entityId: lead._id,
+      label: `${lead.buyerName} updated`,
+      meta: { fields: Object.keys(dto) },
+    });
     return this.findById(id);
   }
 
@@ -200,6 +217,14 @@ export class CrmBuyersService {
       { new: true },
     );
     if (!lead) throw new NotFoundException('Buyer lead not found');
+    await this.activity.log({
+      module: 'crm-buyers',
+      action: 'test-drive-booked',
+      entity: 'Buyer',
+      entityId: lead._id,
+      label: `${lead.buyerName} · test drive on ${dto.vehicleTitle ?? 'a vehicle'}`,
+      meta: { vehicleId: dto.vehicleId, scheduledAt: dto.scheduledAt },
+    });
     return this.findById(id);
   }
 
@@ -226,6 +251,15 @@ export class CrmBuyersService {
       { new: true },
     );
     if (!lead) throw new NotFoundException('Buyer lead not found');
+    await this.activity.log({
+      module: 'communication',
+      action: 'logged',
+      entity: 'Buyer',
+      entityId: lead._id,
+      label: `${dto.channel} with ${lead.buyerName}${dto.summary ? ` — "${dto.summary.slice(0, 40)}"` : ''}`,
+      byId: userId,
+      meta: { channel: dto.channel },
+    });
     return this.findById(id);
   }
 
@@ -275,7 +309,18 @@ export class CrmBuyersService {
 
   async remove(id: string): Promise<void> {
     if (!isValidObjectId(id)) throw new BadRequestException('Invalid buyer id');
-    const lead = await this.model.findOneAndUpdate({ _id: id, isDeleted: false }, { isDeleted: true });
+    const lead = await this.model.findOneAndUpdate(
+      { _id: id, isDeleted: false },
+      { isDeleted: true },
+      { new: false },
+    );
     if (!lead) throw new NotFoundException('Buyer lead not found');
+    await this.activity.log({
+      module: 'crm-buyers',
+      action: 'deleted',
+      entity: 'Buyer',
+      entityId: lead._id,
+      label: `${lead.buyerName} removed`,
+    });
   }
 }

@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types } from 'mongoose';
+import { Document, Schema as MongooseSchema, Types } from 'mongoose';
 
 export type LeadDocument = Lead & Document;
 
@@ -38,10 +38,15 @@ export enum LeadChannel {
 
 @Schema({ timestamps: true, collection: 'leads' })
 export class Lead {
-  @Prop({ type: Types.ObjectId, ref: 'BuyerLead', required: true })
+  // NB: must use `MongooseSchema.Types.ObjectId` here, not `Types.ObjectId`.
+  // The latter is the runtime constructor and Mongoose silently treats it as
+  // a Mixed schema type — strings stay strings on save, and any subsequent
+  // `{ vehicle: new Types.ObjectId(id) }` filter matches zero documents.
+  // That bug masked the entire sibling-archive cascade for months.
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'BuyerLead', required: true })
   buyer: Types.ObjectId;
 
-  @Prop({ type: Types.ObjectId, ref: 'Vehicle', required: true })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Vehicle', required: true })
   vehicle: Types.ObjectId;
 
   @Prop({ type: String, enum: LeadSource, required: true })
@@ -50,7 +55,7 @@ export class Lead {
   @Prop({ type: String, enum: LeadStatus, default: LeadStatus.NEW })
   status: LeadStatus;
 
-  @Prop({ type: Types.ObjectId, ref: 'User' })
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'User' })
   assignedTo: Types.ObjectId;
 
   @Prop({ default: '' })
@@ -82,9 +87,9 @@ export class Lead {
       date: { type: Date, default: Date.now },
       channel: { type: String, enum: LeadChannel, required: true },
       summary: { type: String, default: '' },
-      vehicle: { type: Types.ObjectId, ref: 'Vehicle' },
+      vehicle: { type: MongooseSchema.Types.ObjectId, ref: 'Vehicle' },
       vehicleTitle: { type: String },
-      byStaff: { type: Types.ObjectId, ref: 'User' },
+      byStaff: { type: MongooseSchema.Types.ObjectId, ref: 'User' },
     }],
     default: [],
   })

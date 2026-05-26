@@ -1,5 +1,5 @@
 import {
-  Injectable, NotFoundException, ConflictException, Inject, forwardRef,
+  Injectable, Logger, NotFoundException, ConflictException, Inject, forwardRef,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, FilterQuery, Types, isValidObjectId } from 'mongoose';
@@ -9,15 +9,19 @@ import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto } from './dto/vehic
 import { PaginatedResult } from '../../common/dto/pagination.dto';
 import { SellerLead, SellerLeadDocument } from '../crm-sellers/schemas/seller-lead.schema';
 import { AccountingService } from '../accounting/accounting.service';
+import { ActivityService } from '../activity/activity.service';
 
 @Injectable()
 export class InventoryService {
+  private readonly logger = new Logger(InventoryService.name);
+
   constructor(
     @InjectModel(Vehicle.name) private vehicleModel: Model<VehicleDocument>,
     @InjectModel(SellerLead.name) private sellerLeadModel: Model<SellerLeadDocument>,
     // forwardRef: AccountingModule already imports the Vehicle schema, so DI
     // would deadlock without it.
     @Inject(forwardRef(() => AccountingService)) private accountingService: AccountingService,
+    private readonly activity: ActivityService,
   ) {}
 
   /**
@@ -47,7 +51,17 @@ export class InventoryService {
       addedBy: userId,
       seller,
     });
-    return vehicle.save();
+    const saved = await vehicle.save();
+    await this.activity.log({
+      module: 'inventory',
+      action: 'created',
+      entity: 'Vehicle',
+      entityId: saved._id,
+      label: `${saved.title} (${saved.vehicleNumber})`,
+      byId: userId,
+      meta: { price: saved.price, status: saved.status },
+    });
+    return saved;
   }
 
   private async generateUniqueVehicleNumber(): Promise<string> {
@@ -152,6 +166,26 @@ export class InventoryService {
       { new: true, runValidators: true },
     );
 
+    // Log AFTER the write so we don't double-record if the update throws.
+    // Status changes get their own action verb so the dashboard can show
+    // "Vehicle sold" / "Vehicle marked unsold" rather than a generic update.
+    if (updated) {
+      const statusChanged = dto.status !== undefined && dto.status !== vehicle.status;
+      await this.activity.log({
+        module: 'inventory',
+        action: statusChanged
+          ? (dto.status === VehicleStatus.SOLD ? 'sold' : 'status-changed')
+          : 'updated',
+        entity: 'Vehicle',
+        entityId: updated._id,
+        label: `${updated.title} (${updated.vehicleNumber})`,
+        byId: userId,
+        meta: statusChanged
+          ? { from: vehicle.status, to: dto.status }
+          : { fieldsChanged: historyEntries.map((h) => h.field) },
+      });
+    }
+
     // If this update flipped the vehicle into "sold", make sure the sales
     // ledger has a row for it. Best-effort: a failure here must not block the
     // vehicle update itself.
@@ -178,14 +212,30 @@ export class InventoryService {
       dto.status !== VehicleStatus.SOLD
     ) {
       try {
-        await this.accountingService.cleanupSoldArtifacts(String(updated._id));
+        const counts = await this.accountingService.cleanupSoldArtifacts(String(updated._id));
         // Clear the realised price/date so Inventory stops showing them.
         await this.vehicleModel.updateOne(
           { _id: updated._id },
           { $set: { soldAt: 0, soldDate: null } },
         );
-      } catch {
-        /* swallow */
+        // Verifies the cascade. archivedLeads=0 here is the smoking gun for
+        // the "sibling/closed lead didn't archive on un-sell" complaint —
+        // either the lead's `vehicle` field is a string instead of ObjectId,
+        // or no lead was actually in status='closed' when we ran.
+        this.logger.log(
+          `inverse-transition cleanup vehicleId=${String(updated._id)} ` +
+          `from=${vehicle.status} to=${dto.status} ` +
+          `archivedLeads=${counts.archivedLeads} ` +
+          `deletedSales=${counts.deletedSales} ` +
+          `pulledPurchases=${counts.pulledPurchases}`,
+        );
+      } catch (err) {
+        // Vehicle update is already authoritative — never reject the request.
+        // But surface the failure so we don't repeat the silent-swallow bug.
+        this.logger.error(
+          `inverse-transition cleanup failed for vehicleId=${String(updated._id)}`,
+          err instanceof Error ? err.stack : String(err),
+        );
       }
     }
 
@@ -212,12 +262,25 @@ export class InventoryService {
     return vehicle;
   }
 
-  async softDelete(id: string): Promise<void> {
+  async softDelete(id: string, userId?: string): Promise<void> {
+    // `new: false` returns the pre-delete document so we know whether it was
+    // sold — we need to fire the sale-reversal cascade for sold vehicles.
     const vehicle = await this.vehicleModel.findOneAndUpdate(
       { _id: id, isDeleted: false },
       { isDeleted: true, deletedAt: new Date() },
+      { new: false },
     );
     if (!vehicle) throw new NotFoundException('Vehicle not found');
+
+    await this.activity.log({
+      module: 'inventory',
+      action: 'deleted',
+      entity: 'Vehicle',
+      entityId: vehicle._id,
+      label: `${vehicle.title} (${vehicle.vehicleNumber})`,
+      byId: userId,
+      meta: { previousStatus: vehicle.status },
+    });
 
     // Clean up the seller→vehicle back-link so the seller detail page doesn't
     // show stale rows after the vehicle has been removed from inventory.
@@ -226,6 +289,31 @@ export class InventoryService {
         { vehicles: new Types.ObjectId(id) },
         { $pull: { vehicles: new Types.ObjectId(id) } },
       );
+    }
+
+    // If the vehicle was sold, deleting it implicitly reverses the sale:
+    //   - the Sale row gets soft-deleted (it references a deleted vehicle)
+    //   - the buyer's purchases[] entry for this car gets pulled
+    //   - the closed lead is archived (audit trail of "this was sold once")
+    // Otherwise the dealer would be left with a sale referencing a
+    // non-existent vehicle and a "closed" lead pointing into the void.
+    if (vehicle.status === VehicleStatus.SOLD) {
+      try {
+        const counts = await this.accountingService.cleanupSoldArtifacts(id);
+        this.logger.log(
+          `vehicle-delete cascade vehicleId=${id} ` +
+          `archivedLeads=${counts.archivedLeads} ` +
+          `deletedSales=${counts.deletedSales} ` +
+          `pulledPurchases=${counts.pulledPurchases}`,
+        );
+      } catch (err) {
+        // Vehicle is already soft-deleted — never reject. Log so we can see
+        // when the cascade misfires.
+        this.logger.error(
+          `vehicle-delete cascade failed for vehicleId=${id}`,
+          err instanceof Error ? err.stack : String(err),
+        );
+      }
     }
   }
 

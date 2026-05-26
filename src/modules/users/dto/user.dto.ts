@@ -52,3 +52,28 @@ export class ChangePasswordDto {
   })
   newPassword: string;
 }
+
+/**
+ * Payload for POST /users/invite — admin-initiated.
+ * No password: the invitee sets it via /auth/accept-invite after clicking
+ * the link sent to their email.
+ */
+export class InviteUserDto {
+  @ApiProperty({ example: 'Jane' })
+  @IsNotEmpty() @IsString() firstName: string;
+
+  @ApiProperty({ example: 'Doe' })
+  @IsNotEmpty() @IsString() lastName: string;
+
+  @ApiProperty({ example: 'jane.doe@cdms.com' })
+  @IsEmail() email: string;
+
+  @ApiProperty({ description: 'Role ObjectId (ref: Role)' })
+  @IsMongoId() roleId: string;
+
+  @ApiPropertyOptional({ example: '+1234567890' })
+  @IsOptional() @IsString() phone?: string;
+
+  @ApiPropertyOptional({ example: 'Sales' })
+  @IsOptional() @IsString() department?: string;
+}

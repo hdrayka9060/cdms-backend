@@ -1,13 +1,14 @@
 import {
-  Controller, Post, Body, HttpCode, HttpStatus, UseGuards, Req,
+  Controller, Get, Post, Body, Param, HttpCode, HttpStatus, UseGuards, Req,
 } from '@nestjs/common';
 import {
-  ApiTags, ApiOperation, ApiResponse, ApiBearerAuth,
+  ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiParam,
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import {
   RegisterDto, LoginDto, RefreshTokenDto, ForgotPasswordDto, ResetPasswordDto,
+  AcceptInviteDto,
 } from './dto/auth.dto';
 import { Public } from '../../common/decorators/public.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -161,5 +162,55 @@ Use \`accessToken\` in the \`Authorization: Bearer <token>\` header for all prot
   async resetPassword(@Body() dto: ResetPasswordDto) {
     const result = await this.authService.resetPassword(dto);
     return { ...result, data: null };
+  }
+
+  /**
+   * GET /api/v1/auth/invite/:token
+   *
+   * Public lookup so the frontend's /accept-invite page can render a
+   * personalised welcome (name, email, role) before asking for a password.
+   * Returns 404 if the token is invalid, expired, or already used —
+   * frontend should redirect to /auth in that case.
+   */
+  @Get('invite/:token')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Validate an invite token',
+    description: `Returns the invitee's name, email, and role so the
+accept-invite page can render a personalised set-password form. Token is the
+raw string from the email link (NOT the hashed value stored in the DB).`,
+  })
+  @ApiParam({ name: 'token', description: 'Raw invite token from the email link' })
+  @ApiResponse({ status: 200, description: 'Invite is valid' })
+  @ApiResponse({ status: 404, description: 'Invite invalid, expired, or already used' })
+  async getInvite(@Param('token') token: string) {
+    const data = await this.authService.validateInvite(token);
+    return { message: 'Invite valid', data };
+  }
+
+  /**
+   * POST /api/v1/auth/accept-invite
+   *
+   * Consumes the invite: sets password, flips status to ACTIVE, clears the
+   * invite token, and issues access + refresh tokens — same shape as
+   * /auth/login. Frontend stores the tokens and routes to /.
+   */
+  @Post('accept-invite')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Accept an invite',
+    description: `Activates an INVITED user. Sets their password, flips
+status to ACTIVE, returns access + refresh tokens so the user is logged in
+immediately — no separate sign-in step.`,
+  })
+  @ApiResponse({ status: 200, description: 'Account activated — returns tokens + user' })
+  @ApiResponse({ status: 400, description: 'Invite invalid or expired' })
+  async acceptInvite(@Body() dto: AcceptInviteDto) {
+    const result = await this.authService.acceptInvite(dto);
+    return { message: 'Account activated', data: result };
   }
 }

@@ -5,6 +5,7 @@ import { Sale, SaleDocument, Expense, ExpenseDocument } from './schemas/accounti
 import { Vehicle, VehicleDocument, VehicleStatus } from '../inventory/schemas/vehicle.schema';
 import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
 import { Lead, LeadDocument, LeadStatus } from '../leads/schemas/lead.schema';
+import { ActivityService } from '../activity/activity.service';
 import { PaginatedResult } from '../../common/dto/pagination.dto';
 
 @Injectable()
@@ -17,6 +18,7 @@ export class AccountingService {
     @InjectModel(Vehicle.name) private vehicleModel: Model<VehicleDocument>,
     @InjectModel(BuyerLead.name) private buyerModel: Model<BuyerLeadDocument>,
     @InjectModel(Lead.name) private leadModel: Model<LeadDocument>,
+    private readonly activity: ActivityService,
   ) {}
 
   /**
@@ -155,6 +157,14 @@ export class AccountingService {
       { new: true },
     );
     if (!updated) throw new NotFoundException('Sale not found');
+    await this.activity.log({
+      module: 'accounting',
+      action: 'updated',
+      entity: 'Sale',
+      entityId: updated._id,
+      label: `Sale edited · ${updated.vehicleTitle ?? 'Vehicle'} (${updated.buyerName})`,
+      meta: { fields: Object.keys(patch) },
+    });
     return updated;
   }
 
@@ -163,8 +173,16 @@ export class AccountingService {
     const updated = await this.saleModel.findOneAndUpdate(
       { _id: id, isDeleted: false },
       { $set: { isDeleted: true } },
+      { new: false },
     );
     if (!updated) throw new NotFoundException('Sale not found');
+    await this.activity.log({
+      module: 'accounting',
+      action: 'deleted',
+      entity: 'Sale',
+      entityId: updated._id,
+      label: `Sale removed · ${updated.vehicleTitle ?? 'Vehicle'} (${updated.buyerName})`,
+    });
   }
 
   async getSales(query: any): Promise<PaginatedResult<SaleDocument>> {
@@ -238,6 +256,19 @@ export class AccountingService {
     // explicit avoids accidental persistence if the schema ever changes.)
     const { buyerLeadId, leadId, ...saleFields } = dto;
     const sale = await new this.saleModel({ ...saleFields, amountPaid }).save();
+
+    // The most user-visible activity entry in the whole app. Logged BEFORE
+    // the side-effects so the dashboard sees "Vehicle sold" first, then the
+    // dependent lead-archive / vehicle-sold events can land after.
+    await this.activity.log({
+      module: 'accounting',
+      action: 'sale-recorded',
+      entity: 'Sale',
+      entityId: sale._id,
+      label: `${dto.vehicleTitle ?? 'Vehicle'} sold to ${dto.buyerName} · $${net.toLocaleString()}`,
+      byName: dto.actorName,
+      meta: { salePrice, discount, net, paymentMethod: dto.paymentMethod, paymentStatus: dto.paymentStatus },
+    });
 
     // ── Side-effect 1: vehicle → sold + realised price + date ──────────────
     if (dto.vehicleId && isValidObjectId(dto.vehicleId)) {
@@ -376,7 +407,18 @@ export class AccountingService {
     return new PaginatedResult(data as unknown as ExpenseDocument[], total, page, limit);
   }
 
-  async createExpense(dto: any): Promise<ExpenseDocument> { return new this.expenseModel(dto).save(); }
+  async createExpense(dto: any): Promise<ExpenseDocument> {
+    const saved = await new this.expenseModel(dto).save();
+    await this.activity.log({
+      module: 'accounting',
+      action: 'created',
+      entity: 'Expense',
+      entityId: saved._id,
+      label: `${saved.title} · $${Number(saved.amount).toLocaleString()} (${saved.category})`,
+      meta: { amount: saved.amount, category: saved.category },
+    });
+    return saved;
+  }
 
   async updateExpense(id: string, dto: any): Promise<ExpenseDocument> {
     if (!isValidObjectId(id)) throw new BadRequestException('Invalid expense id');
@@ -394,6 +436,14 @@ export class AccountingService {
       { new: true },
     );
     if (!updated) throw new NotFoundException('Expense not found');
+    await this.activity.log({
+      module: 'accounting',
+      action: 'updated',
+      entity: 'Expense',
+      entityId: updated._id,
+      label: `Expense edited · ${updated.title}`,
+      meta: { fields: Object.keys(patch) },
+    });
     return updated;
   }
 
@@ -402,8 +452,16 @@ export class AccountingService {
     const updated = await this.expenseModel.findOneAndUpdate(
       { _id: id, isDeleted: false },
       { $set: { isDeleted: true } },
+      { new: false },
     );
     if (!updated) throw new NotFoundException('Expense not found');
+    await this.activity.log({
+      module: 'accounting',
+      action: 'deleted',
+      entity: 'Expense',
+      entityId: updated._id,
+      label: `Expense removed · ${updated.title}`,
+    });
   }
 
   async getProfitLoss(startDate: string, endDate: string): Promise<any> {
@@ -443,13 +501,30 @@ export class AccountingService {
    *     survives and the dealer can see "this was once a sale that got
    *     reversed". A timeline entry on each archived lead records the why.
    *
-   * Best-effort: failures don't propagate; the caller has already committed
-   * its primary write (vehicle update or lead delete).
+   * Pass `options.archiveLeads = false` when the CALLER is going to set the
+   * lead's status explicitly (e.g. `LeadsService.update` reversing a sale via
+   * a PATCH closed→other). Otherwise the cleanup would archive the lead
+   * before the caller's update lands, and the caller's chosen status would
+   * just be applied on top — wasteful and double-writes the timeline.
+   *
+   * Returns the per-collection mutation counts so the caller (and downstream
+   * UI) can confirm the cascade actually fired. Best-effort: failures don't
+   * propagate; the caller has already committed its primary write.
    */
-  async cleanupSoldArtifacts(vehicleId: string): Promise<void> {
-    if (!isValidObjectId(vehicleId)) return;
+  async cleanupSoldArtifacts(
+    vehicleId: string,
+    options?: { archiveLeads?: boolean },
+  ): Promise<{
+    deletedSales: number;
+    pulledPurchases: number;
+    archivedLeads: number;
+  }> {
+    if (!isValidObjectId(vehicleId)) {
+      return { deletedSales: 0, pulledPurchases: 0, archivedLeads: 0 };
+    }
     const vehicleObj = new Types.ObjectId(vehicleId);
     const vehicleIdStr = String(vehicleId);
+    const archiveLeads = options?.archiveLeads !== false; // default true
 
     // Pull buyer.purchases entries that reference any of the sales we're
     // about to soft-delete, BEFORE we hide the sales (so we still have ids).
@@ -458,32 +533,49 @@ export class AccountingService {
       isDeleted: false,
     }).select('_id').lean();
     const saleIds = sales.map((s: any) => s._id);
+
+    let pulledPurchases = 0;
     if (saleIds.length) {
-      await this.buyerModel.updateMany(
+      const pullRes = await this.buyerModel.updateMany(
         { 'purchases.saleId': { $in: saleIds } },
         { $pull: { purchases: { saleId: { $in: saleIds } } } },
       );
+      pulledPurchases = pullRes.modifiedCount ?? 0;
     }
 
-    await Promise.all([
+    const ops: Promise<any>[] = [
       this.saleModel.updateMany(
         { vehicleId: vehicleIdStr, isDeleted: false },
         { $set: { isDeleted: true } },
       ),
-      this.leadModel.updateMany(
-        { vehicle: vehicleObj, status: LeadStatus.CLOSED, isDeleted: false },
-        {
-          $set: { status: LeadStatus.ARCHIVED },
-          $push: {
-            timeline: {
-              date: new Date(),
-              action: 'Auto-archived — sale was reverted',
-              by: 'System',
+    ];
+    if (archiveLeads) {
+      ops.push(
+        this.leadModel.updateMany(
+          { vehicle: vehicleObj, status: LeadStatus.CLOSED, isDeleted: false },
+          {
+            $set: { status: LeadStatus.ARCHIVED },
+            $push: {
+              timeline: {
+                date: new Date(),
+                action: 'Auto-archived — sale was reverted',
+                by: 'System',
+              },
             },
           },
-        },
-      ),
-    ]);
+        ),
+      );
+    }
+
+    const results = await Promise.all(ops);
+    const saleRes = results[0];
+    const leadRes = archiveLeads ? results[1] : { modifiedCount: 0 };
+
+    return {
+      deletedSales: saleRes.modifiedCount ?? 0,
+      pulledPurchases,
+      archivedLeads: leadRes.modifiedCount ?? 0,
+    };
   }
 
   /**

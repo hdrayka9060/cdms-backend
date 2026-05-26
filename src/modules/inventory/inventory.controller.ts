@@ -121,8 +121,8 @@ export class InventoryController {
   @ApiOperation({ summary: 'Delete vehicle (soft)', description: 'Soft-deletes vehicle. Admin/Manager only.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 200, description: 'Vehicle deleted' })
-  async remove(@Param('id') id: string) {
-    await this.inventoryService.softDelete(id);
+  async remove(@Param('id') id: string, @CurrentUser() user: any) {
+    await this.inventoryService.softDelete(id, user?._id?.toString());
     return { message: 'Vehicle deleted', data: null };
   }
 

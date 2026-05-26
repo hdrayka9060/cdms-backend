@@ -3,13 +3,26 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { Ticket, TicketDocument, TicketStatus } from './schemas/ticket.schema';
 import { PaginatedResult } from '../../common/dto/pagination.dto';
+import { ActivityService } from '../activity/activity.service';
 
 @Injectable()
 export class SupportService {
-  constructor(@InjectModel(Ticket.name) private model: Model<TicketDocument>) {}
+  constructor(
+    @InjectModel(Ticket.name) private model: Model<TicketDocument>,
+    private readonly activity: ActivityService,
+  ) {}
 
   async create(dto: any): Promise<TicketDocument> {
-    return new this.model(dto).save();
+    const saved = await new this.model(dto).save();
+    await this.activity.log({
+      module: 'support',
+      action: 'created',
+      entity: 'Ticket',
+      entityId: saved._id,
+      label: `${saved.subject} (${saved.raisedByName})`,
+      meta: { priority: saved.priority, status: saved.status },
+    });
+    return saved;
   }
 
   async findAll(query: any): Promise<PaginatedResult<TicketDocument>> {
@@ -46,6 +59,13 @@ export class SupportService {
       { new: true },
     );
     if (!ticket) throw new NotFoundException('Ticket not found');
+    await this.activity.log({
+      module: 'support',
+      action: 'replied',
+      entity: 'Ticket',
+      entityId: ticket._id,
+      label: `Reply on "${ticket.subject}"`,
+    });
     return ticket;
   }
 
@@ -59,6 +79,14 @@ export class SupportService {
       { new: true },
     );
     if (!ticket) throw new NotFoundException('Ticket not found');
+    await this.activity.log({
+      module: 'support',
+      action: status === TicketStatus.RESOLVED ? 'resolved' : 'status-changed',
+      entity: 'Ticket',
+      entityId: ticket._id,
+      label: `${ticket.subject} · ${status}`,
+      meta: { status, assignedTo },
+    });
     return ticket;
   }
 

@@ -9,6 +9,7 @@ import {
 import { PaginationDto, PaginatedResult } from '../../common/dto/pagination.dto';
 import { InventoryService } from '../inventory/inventory.service';
 import { Vehicle, VehicleDocument } from '../inventory/schemas/vehicle.schema';
+import { ActivityService } from '../activity/activity.service';
 
 /** Shape of one activity-log entry pushed onto SellerLead.activity[]. */
 interface ActivityEntry {
@@ -42,6 +43,7 @@ export class CrmSellersService {
     @InjectModel(SellerLead.name) private model: Model<SellerLeadDocument>,
     @InjectModel(Vehicle.name) private vehicleModel: Model<VehicleDocument>,
     private readonly inventoryService: InventoryService,
+    private readonly globalActivity: ActivityService,
   ) {}
 
   // ── Activity-log helper ─────────────────────────────────────────────────
@@ -105,6 +107,18 @@ export class CrmSellersService {
       { _id: seller._id },
       { $push: { activity: { $each: initialActivity } } },
     );
+
+    // Dashboard activity feed — single rolled-up entry per seller creation,
+    // even when N vehicles were added in the same call.
+    await this.globalActivity.log({
+      module: 'crm-sellers',
+      action: 'created',
+      entity: 'Seller',
+      entityId: seller._id,
+      label: `${seller.sellerName} added${vehicleInputs?.length ? ` with ${vehicleInputs.length} vehicle(s)` : ''}`,
+      byId: userId,
+      meta: { vehicleCount: vehicleInputs?.length ?? 0 },
+    });
 
     return this.findById(sellerId);
   }
@@ -183,6 +197,14 @@ export class CrmSellersService {
         action: 'updated',
         label: `Edited ${changedLabels.join(', ')}`,
         by: userId,
+      });
+      await this.globalActivity.log({
+        module: 'crm-sellers',
+        action: 'updated',
+        entity: 'Seller',
+        entityId: id,
+        label: `${lead.sellerName} · edited ${changedLabels.join(', ')}`,
+        byId: userId,
       });
     }
 
@@ -287,8 +309,16 @@ export class CrmSellersService {
     const lead = await this.model.findOneAndUpdate(
       { _id: id, isDeleted: false },
       { isDeleted: true },
+      { new: false },
     );
     if (!lead) throw new NotFoundException('Seller lead not found');
+    await this.globalActivity.log({
+      module: 'crm-sellers',
+      action: 'deleted',
+      entity: 'Seller',
+      entityId: lead._id,
+      label: `${lead.sellerName} removed`,
+    });
   }
 
   async getPipelineStats(): Promise<any> {

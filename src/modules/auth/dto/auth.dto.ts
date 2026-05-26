@@ -40,3 +40,27 @@ export class ResetPasswordDto {
   })
   newPassword: string;
 }
+
+/**
+ * Body for POST /auth/accept-invite. The invitee clicked the link in their
+ * email and is setting a password for the first time. Returns access +
+ * refresh tokens just like /auth/login — no separate sign-in step.
+ */
+export class AcceptInviteDto {
+  @ApiProperty({ description: 'Raw invite token from the email link' })
+  @IsNotEmpty() @IsString() token: string;
+
+  @ApiProperty({ minLength: 8, example: 'P@ssw0rd!' })
+  @IsNotEmpty()
+  @MinLength(8)
+  @Matches(/((?=.*\d)|(?=.*\W+))(?![.\n])(?=.*[A-Z])(?=.*[a-z]).*$/, {
+    message: 'Password must include uppercase, lowercase, and a number or symbol',
+  })
+  password: string;
+
+  // Allow invitees to correct their own name/phone before activation — the
+  // admin may have spelled it wrong in the invite form.
+  @ApiPropertyOptional() @IsOptional() @IsString() firstName?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() lastName?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() phone?: string;
+}

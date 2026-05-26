@@ -18,6 +18,28 @@ import { PaginatedResult } from '../../common/dto/pagination.dto';
 import { Vehicle, VehicleDocument, VehicleStatus } from '../inventory/schemas/vehicle.schema';
 import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
 import { AccountingService } from '../accounting/accounting.service';
+import { ActivityService } from '../activity/activity.service';
+
+/**
+ * What vehicle status should reflect, given a lead's new status.
+ *
+ * Triggered only when a CLOSED lead is moved to something else — i.e. the
+ * dealer is reversing the sale via the lead. Without this mapping, the
+ * vehicle would stay in 'sold' even after the lead became 'contacted' etc.,
+ * which is the inconsistency this hook was added to fix.
+ *
+ * `new` is intentionally absent — demoting a closed lead all the way back to
+ * 'new' is unusual and we'd rather fall back to UNSOLD than guess. CLOSED
+ * itself is in the map for completeness (closed→closed is a no-op since the
+ * transition detector requires a CHANGE).
+ */
+const LEAD_TO_VEHICLE_STATUS: Partial<Record<LeadStatus, VehicleStatus>> = {
+  [LeadStatus.CLOSED]: VehicleStatus.SOLD,
+  [LeadStatus.ARCHIVED]: VehicleStatus.UNSOLD,
+  [LeadStatus.TEST_DRIVE]: VehicleStatus.TEST_DRIVE,
+  [LeadStatus.CONTACTED]: VehicleStatus.PENDING,
+  [LeadStatus.NEGOTIATION]: VehicleStatus.PENDING,
+};
 
 @Injectable()
 export class LeadsService {
@@ -28,6 +50,7 @@ export class LeadsService {
     @InjectModel(Vehicle.name) private readonly vehicleModel: Model<VehicleDocument>,
     @InjectModel(BuyerLead.name) private readonly buyerModel: Model<BuyerLeadDocument>,
     @Inject(forwardRef(() => AccountingService)) private readonly accountingService: AccountingService,
+    private readonly activity: ActivityService,
   ) {}
 
   /**
@@ -134,6 +157,22 @@ export class LeadsService {
       ...dto,
       timeline: [{ date: new Date(), action: 'Lead created', by: userId }],
     }).save();
+    // Pull buyer + vehicle title for the activity label — small extra reads
+    // but the dashboard surface really wants "John Doe → 2024 Civic", not
+    // bare ObjectIds.
+    const [b, v] = await Promise.all([
+      this.buyerModel.findOne({ _id: buyerObj }).select('buyerName').lean(),
+      this.vehicleModel.findOne({ _id: vehicleObj }).select('title vehicleNumber').lean(),
+    ]);
+    await this.activity.log({
+      module: 'leads',
+      action: 'created',
+      entity: 'Lead',
+      entityId: lead._id,
+      label: `${b?.buyerName ?? 'Buyer'} → ${v?.title ?? 'Vehicle'}`,
+      byName: userId,
+      meta: { source: dto.source, status: dto.status ?? 'new' },
+    });
     return this.findById(String(lead._id));
   }
 
@@ -242,6 +281,73 @@ export class LeadsService {
       { new: true },
     );
     if (!lead) throw new NotFoundException('Lead not found');
+
+    // Log every PATCH — status flips, asked-price tweaks, reassignments all
+    // appear in the activity feed so the dashboard reflects pipeline progress.
+    if (effectiveStatus && effectiveStatus !== existing.status) {
+      await this.activity.log({
+        module: 'leads',
+        action: effectiveStatus === LeadStatus.ARCHIVED ? 'archived' : 'status-changed',
+        entity: 'Lead',
+        entityId: lead._id,
+        label: `Lead moved ${existing.status} → ${effectiveStatus}`,
+        byName: userId,
+        meta: { from: existing.status, to: effectiveStatus },
+      });
+    } else if (willSetAskedPrice) {
+      await this.activity.log({
+        module: 'leads',
+        action: 'updated',
+        entity: 'Lead',
+        entityId: lead._id,
+        label: `Asked price set to $${Number(dto.askedPrice).toLocaleString()}`,
+        byName: userId,
+        meta: { askedPrice: dto.askedPrice },
+      });
+    }
+
+    // Closed → anything else: the dealer is reversing the sale via the lead.
+    // Cascade the unwind so the vehicle, sale row, and buyer's purchases[]
+    // entry don't drift out of sync with the lead's new state.
+    //
+    // - The vehicle's status follows LEAD_TO_VEHICLE_STATUS (archived→unsold,
+    //   test_drive→test_drive, contacted/negotiation→pending). Falls back to
+    //   UNSOLD for anything not in the map (e.g. 'new').
+    // - cleanupSoldArtifacts soft-deletes the Sale row and pulls the buyer's
+    //   purchases[] entry. We pass archiveLeads: false because we've ALREADY
+    //   updated this lead's status above — letting cleanup overwrite it to
+    //   ARCHIVED would defeat the dealer's explicit choice.
+    if (
+      existing.status === LeadStatus.CLOSED &&
+      effectiveStatus &&
+      effectiveStatus !== LeadStatus.CLOSED &&
+      existing.vehicle
+    ) {
+      const vehicleId = String(existing.vehicle);
+      const newVehicleStatus =
+        LEAD_TO_VEHICLE_STATUS[effectiveStatus] ?? VehicleStatus.UNSOLD;
+      try {
+        const counts = await this.accountingService.cleanupSoldArtifacts(
+          vehicleId,
+          { archiveLeads: false },
+        );
+        await this.vehicleModel.updateOne(
+          { _id: existing.vehicle, isDeleted: false },
+          { $set: { status: newVehicleStatus, soldAt: 0, soldDate: null } },
+        );
+        this.logger.log(
+          `closed-lead-edit cascade leadId=${id} vehicleId=${vehicleId} ` +
+          `newLeadStatus=${effectiveStatus} newVehicleStatus=${newVehicleStatus} ` +
+          `deletedSales=${counts.deletedSales} pulledPurchases=${counts.pulledPurchases}`,
+        );
+      } catch (err) {
+        this.logger.error(
+          `closed-lead-edit cascade failed for leadId=${id} vehicleId=${vehicleId}`,
+          err instanceof Error ? err.stack : String(err),
+        );
+      }
+    }
+
     return this.findById(id);
   }
 
@@ -360,6 +466,15 @@ export class LeadsService {
       { new: true },
     );
     if (!lead) throw new NotFoundException('Lead not found');
+    await this.activity.log({
+      module: 'calendar',
+      action: 'test-drive-booked',
+      entity: 'Lead',
+      entityId: lead._id,
+      label: `Test drive booked · ${new Date(dto.scheduledAt).toLocaleString()}`,
+      byName: userId,
+      meta: { scheduledAt: dto.scheduledAt },
+    });
     return this.findById(id);
   }
 
@@ -454,6 +569,16 @@ export class LeadsService {
       actorName: userId,
     });
 
+    await this.activity.log({
+      module: 'leads',
+      action: 'closed',
+      entity: 'Lead',
+      entityId: lead._id,
+      label: `${buyer.buyerName} bought ${vehicle.title} for $${Number(dto.soldAt).toLocaleString()}`,
+      byName: userId,
+      meta: { soldAt: dto.soldAt, paymentMethod: dto.paymentMethod, paymentStatus: dto.paymentStatus },
+    });
+
     return this.findById(id);
   }
 
@@ -503,6 +628,15 @@ export class LeadsService {
         );
       }
     }
+
+    await this.activity.log({
+      module: 'leads',
+      action: 'deleted',
+      entity: 'Lead',
+      entityId: lead._id,
+      label: `Lead deleted (was ${lead.status})`,
+      meta: { previousStatus: lead.status },
+    });
   }
 
   async getPipelineStats(): Promise<{ _id: string; count: number }[]> {

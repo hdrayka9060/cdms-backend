@@ -1,7 +1,9 @@
 import {
   Injectable,
+  Logger,
   UnauthorizedException,
   BadRequestException,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -10,15 +12,26 @@ import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import { UsersService } from '../users/users.service';
 import { RolesService } from '../roles/roles.service';
-import { RegisterDto, LoginDto, RefreshTokenDto, ForgotPasswordDto, ResetPasswordDto } from './dto/auth.dto';
+import { MailService } from '../mail/mail.service';
+import {
+  RegisterDto,
+  LoginDto,
+  RefreshTokenDto,
+  ForgotPasswordDto,
+  ResetPasswordDto,
+  AcceptInviteDto,
+} from './dto/auth.dto';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private usersService: UsersService,
     private rolesService: RolesService,
     private jwtService: JwtService,
     private configService: ConfigService,
+    private mailService: MailService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -52,6 +65,10 @@ export class AuthService {
   async login(dto: LoginDto) {
     const user = await this.usersService.findByEmail(dto.email, true);
     if (!user) throw new UnauthorizedException('Invalid credentials');
+
+    // INVITED users have no password yet — block with the same generic message
+    // so we don't leak account-existence info beyond what's necessary.
+    if (!user.password) throw new UnauthorizedException('Invalid credentials');
 
     const valid = await bcrypt.compare(dto.password, user.password);
     if (!valid) throw new UnauthorizedException('Invalid credentials');
@@ -101,8 +118,15 @@ export class AuthService {
     const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
     await this.usersService.setResetToken(dto.email, token, expires);
 
-    // In production: send email with token
-    // await this.mailService.sendPasswordReset(user.email, token);
+    // Dispatch the reset email. Mail service swallows its own errors so this
+    // can't reject the request.
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL') ?? 'http://localhost:8080';
+    const resetUrl = `${frontendUrl.replace(/\/$/, '')}/reset-password?token=${token}`;
+    void this.mailService.sendPasswordReset({
+      to: user.email,
+      firstName: user.firstName,
+      resetUrl,
+    });
 
     return { message: 'If the email exists, a reset link has been sent' };
   }
@@ -114,6 +138,46 @@ export class AuthService {
     await this.usersService.resetPassword(user._id.toString(), dto.newPassword);
     await this.usersService.setRefreshToken(user._id.toString(), null); // invalidate all sessions
     return { message: 'Password reset successfully. Please log in.' };
+  }
+
+  /**
+   * Validate an invite token and return the invitee's metadata so the
+   * frontend can render a "You've been invited to <dealership> as <role>"
+   * welcome screen on the accept-password page. Public endpoint — the token
+   * itself is the auth.
+   */
+  async validateInvite(rawToken: string) {
+    const user = await this.usersService.findByInviteToken(rawToken);
+    if (!user) {
+      throw new NotFoundException('Invite is invalid, expired, or already used');
+    }
+    const role: any = user.roleId;
+    return {
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      roleName: role?.name ?? null,
+    };
+  }
+
+  /**
+   * Consume an invite: set password, flip status to ACTIVE, clear token,
+   * and issue access + refresh tokens — same shape as /auth/login so the
+   * frontend can route directly to the dashboard.
+   */
+  async acceptInvite(dto: AcceptInviteDto) {
+    const activated = await this.usersService.acceptInvite(dto.token, dto.password, {
+      firstName: dto.firstName,
+      lastName: dto.lastName,
+      phone: dto.phone,
+    });
+
+    const tokens = await this.generateTokens(activated._id.toString(), activated.email);
+    await this.usersService.setRefreshToken(activated._id.toString(), tokens.refreshToken);
+
+    const { password, refreshToken, inviteToken, inviteTokenExpires, ...userData } =
+      (activated as any).toObject();
+    return { user: userData, ...tokens };
   }
 
   private async generateTokens(userId: string, email: string) {
