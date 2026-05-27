@@ -116,7 +116,7 @@ export class InventoryController {
    * DELETE /api/v1/inventory/:id
    */
   @Delete(':id')
-  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.DELETE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete vehicle (soft)', description: 'Soft-deletes vehicle. Admin/Manager only.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })

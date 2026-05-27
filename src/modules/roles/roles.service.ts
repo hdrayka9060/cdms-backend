@@ -16,7 +16,16 @@ export class RolesService {
   async create(dto: CreateRoleDto): Promise<RoleDocument> {
     const exists = await this.model.findOne({ name: dto.name, isDeleted: false });
     if (exists) throw new ConflictException('Role name already exists');
-    return new this.model(dto).save();
+
+    // Sanitize permissions: remove any entries with empty or invalid actions arrays
+    const cleaned = {
+      ...dto,
+      permissions: (dto.permissions ?? []).filter(
+        (p) => Array.isArray(p.actions) && p.actions.length > 0,
+      ),
+    } as CreateRoleDto;
+
+    return new this.model(cleaned).save();
   }
 
   async findAll(): Promise<RoleDocument[]> {
@@ -34,9 +43,14 @@ export class RolesService {
   }
 
   async update(id: string, dto: UpdateRoleDto): Promise<RoleDocument> {
+    const toSet: Partial<UpdateRoleDto> = { ...dto };
+    if (dto.permissions) {
+      toSet.permissions = dto.permissions.filter((p) => Array.isArray(p.actions) && p.actions.length > 0);
+    }
+
     const role = await this.model.findOneAndUpdate(
       { _id: id, isDeleted: false },
-      { $set: dto },
+      { $set: toSet },
       { new: true, runValidators: true },
     );
     if (!role) throw new NotFoundException('Role not found');
