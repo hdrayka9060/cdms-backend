@@ -1,5 +1,6 @@
 import {
-  Injectable, Logger, NotFoundException, ConflictException, Inject, forwardRef,
+  Injectable, Logger, NotFoundException, ConflictException, BadRequestException,
+  Inject, forwardRef,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -261,6 +262,148 @@ export class InventoryService {
     );
     if (!vehicle) throw new NotFoundException('Vehicle not found');
     return vehicle;
+  }
+
+  /**
+   * Record a reconditioning spend on a vehicle (repair/service/parts/etc).
+   * Blocked once the vehicle is sold — its cost basis is already locked into
+   * the Sale snapshot. The spend `by` is captured as a name string so the
+   * Spends tab can render it without a populate.
+   */
+  async addSpend(
+    id: string,
+    dto: { amount: number; category?: string; description?: string; date?: string },
+    user: any,
+  ): Promise<VehicleDocument> {
+    const vehicle = await this.vehicleModel.findOne({ _id: id, isDeleted: false });
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    if (vehicle.status === VehicleStatus.SOLD) {
+      throw new BadRequestException('Cannot add spends to a sold vehicle');
+    }
+    const amount = Number(dto.amount) || 0;
+    if (amount <= 0) throw new BadRequestException('Spend amount must be greater than 0');
+
+    const by =
+      [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() ||
+      user?.email ||
+      'System';
+    const entry = {
+      amount,
+      category: (dto.category ?? 'other').trim() || 'other',
+      description: (dto.description ?? '').trim(),
+      date: dto.date ? new Date(dto.date) : new Date(),
+      by,
+    };
+    vehicle.spends.push(entry as any);
+    const saved = await vehicle.save();
+
+    await this.activity.log({
+      module: 'inventory',
+      action: 'spend-added',
+      entity: 'Vehicle',
+      entityId: saved._id,
+      label: `Spend $${amount.toLocaleString()} (${entry.category}) · ${saved.title}`,
+      byId: user?._id,
+      meta: { amount, category: entry.category },
+    });
+    return saved;
+  }
+
+  /**
+   * Delete a recorded spend. Allowed even after the vehicle is sold (the
+   * dealer can correct a mistake) — in that case we re-sync the Sale's
+   * `totalSpend` snapshot so the P&L / margin stay accurate.
+   */
+  async removeSpend(id: string, spendId: string, user: any): Promise<VehicleDocument> {
+    if (!isValidObjectId(spendId)) throw new BadRequestException('Invalid spend id');
+    const vehicle = await this.vehicleModel.findOneAndUpdate(
+      { _id: id, isDeleted: false },
+      { $pull: { spends: { _id: new Types.ObjectId(spendId) } } },
+      { new: true },
+    );
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+
+    await this.activity.log({
+      module: 'inventory',
+      action: 'spend-removed',
+      entity: 'Vehicle',
+      entityId: vehicle._id,
+      label: `Spend removed · ${vehicle.title}`,
+      byId: user?._id,
+    });
+
+    // If the vehicle has already been sold, its Sale row carries a snapshot of
+    // the spend total — re-sync so the P&L and per-row margin reflect the
+    // deletion. Best-effort: the spend has already been pulled.
+    try {
+      const total = (vehicle.spends ?? []).reduce(
+        (s: number, x: any) => s + (Number(x.amount) || 0),
+        0,
+      );
+      await this.accountingService.syncSaleSpendForVehicle(id, total);
+    } catch (err) {
+      this.logger.error(
+        `removeSpend sale re-sync failed for vehicleId=${id}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+    return vehicle;
+  }
+
+  /**
+   * Edit a recorded spend (amount/category/description/date). Allowed even
+   * after the vehicle is sold (mirrors removeSpend) — if the amount changes on
+   * an already-sold vehicle we re-sync the Sale's `totalSpend` snapshot so the
+   * P&L / margin stay accurate.
+   */
+  async updateSpend(
+    id: string,
+    spendId: string,
+    dto: { amount?: number; category?: string; description?: string; date?: string },
+    user: any,
+  ): Promise<VehicleDocument> {
+    if (!isValidObjectId(spendId)) throw new BadRequestException('Invalid spend id');
+    const vehicle = await this.vehicleModel.findOne({ _id: id, isDeleted: false });
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+
+    const spends = vehicle.spends as any[];
+    const entry = spends.find((s) => String(s._id) === String(spendId));
+    if (!entry) throw new NotFoundException('Spend not found');
+
+    if (dto.amount !== undefined) {
+      const amt = Number(dto.amount);
+      if (!(amt > 0)) throw new BadRequestException('Spend amount must be greater than 0');
+      entry.amount = amt;
+    }
+    if (dto.category !== undefined) entry.category = String(dto.category).trim() || entry.category;
+    if (dto.description !== undefined) entry.description = String(dto.description).trim();
+    if (dto.date !== undefined && dto.date) entry.date = new Date(dto.date);
+    vehicle.markModified('spends');
+    const saved = await vehicle.save();
+
+    await this.activity.log({
+      module: 'inventory',
+      action: 'spend-updated',
+      entity: 'Vehicle',
+      entityId: saved._id,
+      label: `Spend edited · ${saved.title}`,
+      byId: user?._id,
+    });
+
+    // Keep the sold vehicle's Sale snapshot in step with the edited amount.
+    try {
+      const total = (saved.spends ?? []).reduce(
+        (s: number, x: any) => s + (Number(x.amount) || 0),
+        0,
+      );
+      await this.accountingService.syncSaleSpendForVehicle(id, total);
+    } catch (err) {
+      this.logger.error(
+        `updateSpend sale re-sync failed for vehicleId=${id}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+    return saved;
   }
 
   async softDelete(id: string, userId?: string): Promise<void> {

@@ -60,6 +60,7 @@ export class AccountingService {
             _id: null,
             totalRevenue: { $sum: { $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] } },
             totalCost: { $sum: '$costPrice' },
+            totalSpend: { $sum: { $ifNull: ['$totalSpend', 0] } },
             totalDiscount: { $sum: '$discount' },
             count: { $sum: 1 },
           },
@@ -94,15 +95,18 @@ export class AccountingService {
 
     const revenue = salesAgg[0]?.totalRevenue || 0;
     const cost = salesAgg[0]?.totalCost || 0;
+    const spend = salesAgg[0]?.totalSpend || 0;
     const expenses = expensesAgg[0]?.total || 0;
-    // Profit = realised sale price − cost of acquisition (gross margin on
-    // vehicles sold). Operating expenses stay surfaced separately so the
-    // dealer can decide whether to net them out themselves.
+    // Profit = realised sale price − cost basis (acquisition cost +
+    // reconditioning spend) = gross margin on vehicles sold. Reconditioning
+    // spend is cost-of-goods, NOT an operating expense — operating expenses
+    // stay surfaced separately and are never netted out of profit.
     return {
       totalRevenue: revenue,
       totalCost: cost,
+      totalSpend: spend,
       totalExpenses: expenses,
-      totalProfit: revenue - cost,
+      totalProfit: revenue - cost - spend,
       totalSales: salesAgg[0]?.count || 0,
       outstanding: outstandingAgg[0]?.total || 0,
     };
@@ -251,11 +255,23 @@ export class AccountingService {
       amountPaid = net; // 'paid' (default)
     }
 
+    // Snapshot the vehicle's reconditioning spend into the Sale. Sourced from
+    // the vehicle (never from the client) so it can't be tampered with — same
+    // contract as costPrice. Folded into the cost basis for margin/P&L.
+    let totalSpend = 0;
+    if (dto.vehicleId && isValidObjectId(dto.vehicleId)) {
+      const v = await this.vehicleModel.findById(dto.vehicleId).select('spends').lean();
+      totalSpend = ((v as any)?.spends ?? []).reduce(
+        (s: number, x: any) => s + (Number(x.amount) || 0),
+        0,
+      );
+    }
+
     // Strip the orchestration fields before saving — they aren't on the Sale
     // schema. (Mongoose would drop them anyway under strict mode, but being
     // explicit avoids accidental persistence if the schema ever changes.)
     const { buyerLeadId, leadId, ...saleFields } = dto;
-    const sale = await new this.saleModel({ ...saleFields, amountPaid }).save();
+    const sale = await new this.saleModel({ ...saleFields, amountPaid, totalSpend }).save();
 
     // The most user-visible activity entry in the whole app. Logged BEFORE
     // the side-effects so the dashboard sees "Vehicle sold" first, then the
@@ -475,6 +491,7 @@ export class AccountingService {
             // Net revenue (post-discount) so it lines up with the summary card.
             revenue: { $sum: { $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] } },
             cost: { $sum: '$costPrice' },
+            spend: { $sum: { $ifNull: ['$totalSpend', 0] } },
             count: { $sum: 1 },
           },
         },
@@ -590,6 +607,10 @@ export class AccountingService {
       isDeleted: false,
     });
     if (existing) return;
+    const totalSpend = ((vehicle as any).spends ?? []).reduce(
+      (s: number, x: any) => s + (Number(x.amount) || 0),
+      0,
+    );
     await new this.saleModel({
       vehicleTitle: vehicle.title,
       vehicleId: String(vehicle._id),
@@ -597,6 +618,7 @@ export class AccountingService {
       buyerEmail: 'pending@example.com',
       salePrice: vehicle.price ?? 0,
       costPrice: 0,
+      totalSpend,
       discount: vehicle.discount ?? 0,
       amountPaid: 0,
       saleDate: new Date(),
@@ -604,5 +626,19 @@ export class AccountingService {
       paymentStatus: 'pending',
       notes: 'Auto-created when the vehicle was marked sold from Inventory.',
     }).save();
+  }
+
+  /**
+   * Re-sync a sold vehicle's Sale row with its current reconditioning-spend
+   * total. Called by InventoryService.removeSpend when a spend is deleted on a
+   * vehicle that's already sold, so the snapshot (and therefore the P&L /
+   * margin) doesn't drift. No-op if there's no live Sale for the vehicle.
+   */
+  async syncSaleSpendForVehicle(vehicleId: string, totalSpend: number): Promise<void> {
+    if (!isValidObjectId(vehicleId)) return;
+    await this.saleModel.updateOne(
+      { vehicleId: String(vehicleId), isDeleted: false },
+      { $set: { totalSpend: Math.max(0, Number(totalSpend) || 0) } },
+    );
   }
 }

@@ -86,6 +86,25 @@ export class Vehicle {
   @ApiProperty({ enum: HostingType }) @Prop({ type: String, enum: HostingType, default: HostingType.PLATFORM }) hosting: HostingType;
   @ApiProperty() @Prop({ type: [String], default: [] }) features: string[];
   @ApiProperty() @Prop({ type: [{ field: String, value: String, changedAt: Date, changedBy: String }], default: [] }) history: any[];
+  /**
+   * Money spent reconditioning the car BEFORE it sells (repairs, service,
+   * parts, transport, detailing, …). These are cost-of-goods, not operating
+   * expenses: the sum is snapshotted onto the Sale (`Sale.totalSpend`) at sale
+   * time and folded into the gross-margin maths (profit = revenue − costPrice
+   * − totalSpend). Adding is blocked once the vehicle is sold; deleting an
+   * existing entry re-syncs the Sale snapshot. `by` is a captured name
+   * snapshot (mirrors Lead.timeline.by) so no populate is needed.
+   */
+  @ApiProperty() @Prop({
+    type: [{
+      amount: { type: Number, required: true, min: 0 },
+      category: { type: String, default: 'other' },
+      description: { type: String, default: '' },
+      date: { type: Date, default: Date.now },
+      by: { type: String, default: '' },
+    }],
+    default: [],
+  }) spends: { amount: number; category: string; description: string; date: Date; by: string }[];
   @ApiProperty() @Prop({ type: TrafficLog, default: {} }) traffic: TrafficLog;
   @ApiProperty() @Prop({ type: Types.ObjectId, ref: 'User' }) addedBy: Types.ObjectId;
   /**

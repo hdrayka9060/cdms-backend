@@ -11,7 +11,7 @@ import {
   ApiConsumes, ApiBody,
 } from '@nestjs/swagger';
 import { InventoryService } from './inventory.service';
-import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto } from './dto/vehicle.dto';
+import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto, CreateVehicleSpendDto, UpdateVehicleSpendDto } from './dto/vehicle.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
@@ -165,6 +165,65 @@ export class InventoryController {
   async removeImage(@Param('id') id: string, @Body() body: { photoPath: string }) {
     const vehicle = await this.inventoryService.removeImage(id, body.photoPath);
     return { message: 'Image removed', data: vehicle };
+  }
+
+  /**
+   * POST /api/v1/inventory/:id/spends
+   */
+  @Post(':id/spends')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
+  @ApiOperation({
+    summary: 'Add a reconditioning spend to a vehicle',
+    description: `Records money spent on the car before it sells (repairs, service, parts, transport, detailing, etc.).
+
+These are cost-of-goods, not operating expenses: the total is folded into the vehicle's cost basis at sale time (profit = sale price − cost − spends). **Blocked once the vehicle is sold** (the cost basis is locked into the Sale).`,
+  })
+  @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
+  @ApiResponse({ status: 201, description: 'Spend added' })
+  @ApiResponse({ status: 400, description: 'Vehicle is already sold, or invalid amount' })
+  async addSpend(@Param('id') id: string, @Body() dto: CreateVehicleSpendDto, @CurrentUser() user: any) {
+    const vehicle = await this.inventoryService.addSpend(id, dto, user);
+    return { message: 'Spend added', data: vehicle };
+  }
+
+  /**
+   * PATCH /api/v1/inventory/:id/spends/:spendId
+   */
+  @Patch(':id/spends/:spendId')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
+  @ApiOperation({
+    summary: 'Edit a recorded spend',
+    description: 'Updates amount/category/description/date. Allowed even after the vehicle is sold — the Sale\'s spend snapshot is re-synced so the P&L stays accurate.',
+  })
+  @ApiParam({ name: 'id', description: 'Vehicle MongoDB ObjectId' })
+  @ApiParam({ name: 'spendId', description: 'Spend subdocument ObjectId' })
+  @ApiResponse({ status: 200, description: 'Spend updated' })
+  async updateSpend(
+    @Param('id') id: string,
+    @Param('spendId') spendId: string,
+    @Body() dto: UpdateVehicleSpendDto,
+    @CurrentUser() user: any,
+  ) {
+    const vehicle = await this.inventoryService.updateSpend(id, spendId, dto, user);
+    return { message: 'Spend updated', data: vehicle };
+  }
+
+  /**
+   * DELETE /api/v1/inventory/:id/spends/:spendId
+   */
+  @Delete(':id/spends/:spendId')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.DELETE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Delete a recorded spend',
+    description: 'Removes a spend entry. Requires Inventory:delete. Allowed even after the vehicle is sold — the Sale\'s spend snapshot is re-synced so the P&L stays accurate.',
+  })
+  @ApiParam({ name: 'id', description: 'Vehicle MongoDB ObjectId' })
+  @ApiParam({ name: 'spendId', description: 'Spend subdocument ObjectId' })
+  @ApiResponse({ status: 200, description: 'Spend removed' })
+  async removeSpend(@Param('id') id: string, @Param('spendId') spendId: string, @CurrentUser() user: any) {
+    const vehicle = await this.inventoryService.removeSpend(id, spendId, user);
+    return { message: 'Spend removed', data: vehicle };
   }
 
   /**

@@ -15,6 +15,13 @@ export class Sale {
   @Prop({ required: true }) salePrice: number;
   /** What the dealership paid for the car — used for profit calculation. */
   @Prop({ default: 0 }) costPrice: number;
+  /**
+   * Reconditioning spend (repairs/service/parts/etc.) snapshotted from the
+   * vehicle at sale time. Part of the cost basis: profit = (salePrice −
+   * discount) − costPrice − totalSpend. Re-synced if a spend is deleted on the
+   * already-sold vehicle (InventoryService.removeSpend → syncSaleSpendForVehicle).
+   */
+  @Prop({ default: 0 }) totalSpend: number;
   /** Discount applied off `salePrice`. Net = salePrice - discount. */
   @Prop({ default: 0 }) discount: number;
   /**

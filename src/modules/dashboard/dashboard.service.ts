@@ -98,8 +98,9 @@ export class DashboardService {
           $group: {
             _id: null,
             revenue: { $sum: { $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] } },
-            // Profit = revenue − cost (matches the accounting page's definition).
-            profit: { $sum: { $subtract: [{ $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] }, { $ifNull: ['$costPrice', 0] }] } },
+            // Profit = revenue − (cost + reconditioning spend). Matches the
+            // accounting page's gross-margin definition.
+            profit: { $sum: { $subtract: [{ $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] }, { $add: [{ $ifNull: ['$costPrice', 0] }, { $ifNull: ['$totalSpend', 0] }] }] } },
           },
         },
       ]),
@@ -173,7 +174,7 @@ export class DashboardService {
           $group: {
             _id: { year: { $year: '$saleDate' }, month: { $month: '$saleDate' } },
             revenue: { $sum: { $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] } },
-            profit: { $sum: { $subtract: [{ $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] }, { $ifNull: ['$costPrice', 0] }] } },
+            profit: { $sum: { $subtract: [{ $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] }, { $add: [{ $ifNull: ['$costPrice', 0] }, { $ifNull: ['$totalSpend', 0] }] }] } },
           },
         },
         { $sort: { '_id.year': 1, '_id.month': 1 } },

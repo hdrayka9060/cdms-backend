@@ -67,6 +67,27 @@ export class UpdateVehicleDto {
   @IsOptional() @IsString() soldDate?: string;
 }
 
+export class CreateVehicleSpendDto {
+  @ApiProperty({ example: 500, description: 'Amount spent (dealership currency).' })
+  @IsNumber() @Min(0) amount: number;
+  @ApiPropertyOptional({
+    description: 'Free-text category. Client offers: Repair | Service | Parts | Transport | Detailing | Other.',
+    example: 'Repair',
+  })
+  @IsOptional() @IsString() category?: string;
+  @ApiPropertyOptional({ description: 'What the money was spent on.' })
+  @IsOptional() @IsString() description?: string;
+  @ApiPropertyOptional({ description: 'ISO date of the spend. Defaults to now.' })
+  @IsOptional() @IsString() date?: string;
+}
+
+export class UpdateVehicleSpendDto {
+  @ApiPropertyOptional({ example: 450 }) @IsOptional() @IsNumber() @Min(0) amount?: number;
+  @ApiPropertyOptional({ example: 'Service' }) @IsOptional() @IsString() category?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() description?: string;
+  @ApiPropertyOptional({ description: 'ISO date of the spend.' }) @IsOptional() @IsString() date?: string;
+}
+
 export class VehicleQueryDto extends PaginationDto {
   @ApiPropertyOptional({ enum: VehicleStatus }) @IsOptional() @IsEnum(VehicleStatus) status?: VehicleStatus;
   @ApiPropertyOptional() @IsOptional() @IsString() company?: string;
