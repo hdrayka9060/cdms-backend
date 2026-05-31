@@ -34,6 +34,7 @@ export class InventoryController {
    * POST /api/v1/inventory
    */
   @Post()
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Add a new vehicle',
     description: `Creates a new vehicle listing in the inventory.
@@ -53,6 +54,7 @@ export class InventoryController {
    * GET /api/v1/inventory
    */
   @Get()
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.VIEW)
   @ApiOperation({
     summary: 'List all vehicles',
     description: `Returns paginated, filtered, and sorted list of vehicles.
@@ -80,6 +82,7 @@ export class InventoryController {
    * GET /api/v1/inventory/stats
    */
   @Get('stats')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get inventory statistics', description: 'Returns counts by status and average price.' })
   @ApiResponse({ status: 200, description: 'Stats returned' })
   async getStats() {
@@ -91,6 +94,7 @@ export class InventoryController {
    * GET /api/v1/inventory/:id
    */
   @Get(':id')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get vehicle by ID', description: 'Returns full vehicle details. Also increments view count.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 200, description: 'Vehicle found' })
@@ -104,6 +108,7 @@ export class InventoryController {
    * PATCH /api/v1/inventory/:id
    */
   @Patch(':id')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Update vehicle details', description: 'Partial update. All fields optional. Changes are tracked in vehicle history.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 200, description: 'Vehicle updated' })
@@ -130,6 +135,7 @@ export class InventoryController {
    * POST /api/v1/inventory/:id/images
    */
   @Post(':id/images')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
   @UseInterceptors(FilesInterceptor('images', 10, { storage: imageStorage }))
   @ApiConsumes('multipart/form-data')
   @ApiBody({ description: 'Upload up to 10 vehicle images', schema: { type: 'object', properties: { images: { type: 'array', items: { type: 'string', format: 'binary' } } } } })
@@ -148,6 +154,7 @@ export class InventoryController {
    * Body: { photoPath: "/uploads/vehicles/<filename>" }
    */
   @Delete(':id/images')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Delete a vehicle image',
@@ -172,7 +179,11 @@ export class InventoryController {
     summary: 'Bulk upload vehicles via CSV',
     description: `Uploads a CSV file to create multiple vehicles at once.
 
-**CSV Columns:** vehicleNumber (optional), title, company, model, year, price, km, discount, owners, fuelType, transmission, color, description, vin, bodyType
+**CSV Columns** (mirror the Add Vehicle form): title, company, model, trim, year, engine, fuelType, transmission, bodyType, vin, km, price, discount, owners, color, hosting, description (plus optional vehicleNumber — auto-generated if blank)
+
+**Required:** company, model, year, price. (title is optional — auto-built from year/company/model when blank.) Rows missing a required field are skipped and reported in \`errors\`.
+
+**Enum columns (lowercase):** fuelType = petrol|diesel|electric|hybrid|cng · transmission = manual|automatic|cvt · hosting = self|platform. Blank enum cells fall back to schema defaults.
 
 **Notes:**
 - Skip existing vehicle numbers
@@ -188,6 +199,7 @@ export class InventoryController {
    * GET /api/v1/inventory/:id/history
    */
   @Get(':id/history')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get vehicle change history', description: 'Returns log of all field changes with timestamps and who made the change.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 200, description: 'History log returned' })
@@ -200,6 +212,7 @@ export class InventoryController {
    * GET /api/v1/inventory/:id/traffic
    */
   @Get(':id/traffic')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get vehicle traffic/view stats', description: 'Returns views, clicks, inquiries, and last viewed timestamp.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 200, description: 'Traffic data returned' })

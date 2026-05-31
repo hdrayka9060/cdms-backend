@@ -3,10 +3,13 @@ import { ApiTags, ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse } from '@ne
 import { DashboardService } from './dashboard.service';
 import { ActivityService } from '../activity/activity.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { AppModule, PermissionAction } from '../../common/permissions';
 
 @ApiTags('Dashboard')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'dashboard', version: '1' })
 export class DashboardController {
   constructor(
@@ -21,6 +24,7 @@ export class DashboardController {
    * snapshot (the previous block will be null, hasPrevious=false).
    */
   @Get('stats')
+  @RequirePermission(AppModule.DASHBOARD, PermissionAction.VIEW)
   @ApiOperation({
     summary: 'Dashboard KPIs with trend deltas',
     description: `Six metrics for the current window + the equal-length prior window. KPIs:
@@ -49,6 +53,7 @@ Pass startDate + endDate (YYYY-MM-DD). Omit both for all-time.`,
    * Returns chart data — always last 12 months for trend visibility.
    */
   @Get('charts')
+  @RequirePermission(AppModule.DASHBOARD, PermissionAction.VIEW)
   @ApiOperation({
     summary: 'Dashboard chart datasets',
     description: `Returns:
@@ -74,6 +79,7 @@ show seasonality so dealers can spot patterns.`,
    * mutation (create/update/delete/close/etc.) across the app.
    */
   @Get('activity')
+  @RequirePermission(AppModule.DASHBOARD, PermissionAction.VIEW)
   @ApiOperation({
     summary: 'Recent activity feed',
     description:

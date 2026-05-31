@@ -70,7 +70,19 @@ export class Vehicle {
   @ApiProperty() @Prop({ default: '' }) vin: string;
   /** Free-text body type from VIN decoder (e.g. "Sedan", "Pickup Truck", "SUV"). */
   @ApiProperty() @Prop({ default: '' }) bodyType: string;
-  @ApiProperty({ enum: VehicleStatus }) @Prop({ type: String, enum: VehicleStatus, default: VehicleStatus.PENDING }) status: VehicleStatus;
+  /** Trim / series (e.g. "XSE", "Sport"). Free-text; VIN decoder fills it. */
+  @ApiPropertyOptional() @Prop({ default: '' }) trim: string;
+  /** Engine summary (e.g. "2.0L · 4-cyl · 200hp"). Free-text; VIN decoder fills it. */
+  @ApiPropertyOptional() @Prop({ default: '' }) engine: string;
+  /**
+   * Lifecycle status. Defaults to NEW for freshly added vehicles — the
+   * `InventoryService.expireNewVehicles` cron flips any vehicle still in NEW
+   * after 2 days of createdAt over to PENDING. Manually changing status off
+   * NEW (any path: PATCH, lead-close cascade, etc.) takes the vehicle out of
+   * the cron's scope; the timer is effectively "since createdAt, while still
+   * NEW".
+   */
+  @ApiProperty({ enum: VehicleStatus }) @Prop({ type: String, enum: VehicleStatus, default: VehicleStatus.NEW }) status: VehicleStatus;
   @ApiProperty({ enum: HostingType }) @Prop({ type: String, enum: HostingType, default: HostingType.PLATFORM }) hosting: HostingType;
   @ApiProperty() @Prop({ type: [String], default: [] }) features: string[];
   @ApiProperty() @Prop({ type: [{ field: String, value: String, changedAt: Date, changedBy: String }], default: [] }) history: any[];

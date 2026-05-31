@@ -30,17 +30,20 @@ import {
   UpdateLogEntryDto,
 } from './dto/lead.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { AppModule, PermissionAction } from '../../common/permissions';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Leads')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'leads', version: '1' })
 export class LeadsController {
   constructor(private readonly service: LeadsService) {}
 
   @Post()
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Create a lead',
     description: 'Creates a sales lead linking a buyer to a vehicle. Auto-adds a "Lead created" timeline entry.',
@@ -53,6 +56,7 @@ export class LeadsController {
   }
 
   @Get()
+  @RequirePermission(AppModule.LEADS, PermissionAction.VIEW)
   @ApiOperation({
     summary: 'List leads',
     description: 'Paginated list with filters: status, source, assignedTo, buyer, vehicle, search (notes).',
@@ -64,6 +68,7 @@ export class LeadsController {
   }
 
   @Get('pipeline-stats')
+  @RequirePermission(AppModule.LEADS, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get pipeline stats', description: 'Count per status.' })
   async getPipelineStats() {
     const stats = await this.service.getPipelineStats();
@@ -71,6 +76,7 @@ export class LeadsController {
   }
 
   @Get(':id')
+  @RequirePermission(AppModule.LEADS, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get lead by ID' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 200, description: 'Lead found' })
@@ -81,6 +87,7 @@ export class LeadsController {
   }
 
   @Patch(':id')
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Update lead',
     description: 'Update status, assignment, or notes. Status/assignment changes auto-append a timeline entry.',
@@ -93,6 +100,7 @@ export class LeadsController {
   }
 
   @Post(':id/timeline')
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Append a timeline entry',
     description: 'Records a human-readable action (e.g. "Reservation taken") onto the lead timeline.',
@@ -109,6 +117,7 @@ export class LeadsController {
   }
 
   @Post(':id/log')
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Append a communication log entry',
     description: `Logs a communication for this lead.
@@ -128,6 +137,7 @@ Optional: \`vehicleId\` to attach which vehicle the comm was about, \`byStaffId\
   }
 
   @Patch(':id/log/:logId')
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Edit a communication log entry' })
   @ApiParam({ name: 'id', description: 'Lead ObjectId' })
   @ApiParam({ name: 'logId', description: 'Log entry ObjectId' })
@@ -141,6 +151,7 @@ Optional: \`vehicleId\` to attach which vehicle the comm was about, \`byStaffId\
   }
 
   @Delete(':id/log/:logId')
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a communication log entry' })
   @ApiParam({ name: 'id', description: 'Lead ObjectId' })
@@ -151,6 +162,7 @@ Optional: \`vehicleId\` to attach which vehicle the comm was about, \`byStaffId\
   }
 
   @Post(':id/book-test-drive')
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Book a test drive for this lead',
     description: 'Auto-advances the pipeline to test_drive (if not already past) and appends a timeline entry. The calendar event itself is created by the frontend.',
@@ -167,6 +179,7 @@ Optional: \`vehicleId\` to attach which vehicle the comm was about, \`byStaffId\
   }
 
   @Post(':id/close')
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Close (mark as won) a lead',
     description:
@@ -180,6 +193,7 @@ Optional: \`vehicleId\` to attach which vehicle the comm was about, \`byStaffId\
   }
 
   @Delete(':id')
+  @RequirePermission(AppModule.LEADS, PermissionAction.DELETE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Soft-delete a lead' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })

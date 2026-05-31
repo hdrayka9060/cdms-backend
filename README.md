@@ -64,7 +64,7 @@ cdms-backend/
 │       ├── communication/             # Email/SMS/WhatsApp/Call logs
 │       └── settings/                  # Dealership config
 ├── uploads/                           # Local file storage
-├── .env.example                       # Environment template
+├── .env                               # Environment configuration
 ├── package.json
 └── README.md
 ```
@@ -80,10 +80,7 @@ npm install
 ```
 
 ### 2. Configure environment
-```bash
-cp .env.example .env
-# Edit .env and set MONGODB_URI to your MongoDB Atlas connection string
-```
+Edit `.env` in the repo root and replace the placeholder values with real ones — at minimum `MONGODB_URI` (your MongoDB Atlas connection string) and the JWT secrets. The file ships with every variable the backend reads (MongoDB, JWT, Mail, Google Meet, CORS, throttle, file-upload). Services with placeholder creds fall back to dev mode (links logged, no real Meet/SMTP calls).
 
 ### 3. Start development server
 ```bash
@@ -381,7 +378,7 @@ vehicleNumber (optional, auto-generated), title, company, model, year, price, km
 
 ## Environment Variables
 
-See `.env.example` for the full list. Key variables:
+See `.env` for the full list. Key variables:
 
 ```env
 PORT=3000

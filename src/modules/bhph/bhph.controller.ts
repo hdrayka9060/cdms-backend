@@ -2,16 +2,20 @@ import { Controller, Get, Post, Body, Param, Query, UseGuards } from '@nestjs/co
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { BhphService } from './bhph.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { AppModule, PermissionAction } from '../../common/permissions';
 import { LoanStatus } from './schemas/loan.schema';
 
 @ApiTags('BHPH')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'bhph', version: '1' })
 export class BhphController {
   constructor(private readonly service: BhphService) {}
 
   @Post('loans')
+  @RequirePermission(AppModule.BHPH, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Create a BHPH loan',
     description: `Creates a new dealer-financed loan with auto-calculated EMI.
@@ -28,6 +32,7 @@ export class BhphController {
   }
 
   @Get('loans')
+  @RequirePermission(AppModule.BHPH, PermissionAction.VIEW)
   @ApiOperation({ summary: 'List all BHPH loans', description: 'Paginated loans. Filter by status: active | paid_off | defaulted.' })
   @ApiQuery({ name: 'status', enum: LoanStatus, required: false })
   async findAll(@Query() query: any) {
@@ -36,6 +41,7 @@ export class BhphController {
   }
 
   @Get('summary')
+  @RequirePermission(AppModule.BHPH, PermissionAction.VIEW)
   @ApiOperation({ summary: 'BHPH portfolio summary', description: 'Returns totals per loan status — active, paid off, defaulted.' })
   async getSummary() {
     const data = await this.service.getLoanSummary();
@@ -43,6 +49,7 @@ export class BhphController {
   }
 
   @Get('loans/:id')
+  @RequirePermission(AppModule.BHPH, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get loan detail + EMI schedule', description: 'Returns full loan details and the complete amortization schedule.' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 200, description: 'Returns { loan, schedule }' })
@@ -53,6 +60,7 @@ export class BhphController {
   }
 
   @Post('loans/:id/payment')
+  @RequirePermission(AppModule.BHPH, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Record EMI payment',
     description: `Records an installment payment against a loan.

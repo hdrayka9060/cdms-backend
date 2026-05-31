@@ -25,6 +25,8 @@ export class CreateVehicleDto {
   @ApiPropertyOptional() @IsOptional() @IsString() vin?: string;
   @ApiPropertyOptional({ description: 'Free-text body type (e.g. "Sedan", "SUV"). Populated by VIN decoder.' })
   @IsOptional() @IsString() bodyType?: string;
+  @ApiPropertyOptional({ description: 'Trim / series (e.g. "XSE").' }) @IsOptional() @IsString() trim?: string;
+  @ApiPropertyOptional({ description: 'Engine summary (e.g. "2.0L · 4-cyl").' }) @IsOptional() @IsString() engine?: string;
   @ApiPropertyOptional({ enum: VehicleStatus }) @IsOptional() @IsEnum(VehicleStatus) status?: VehicleStatus;
   @ApiPropertyOptional({ enum: HostingType }) @IsOptional() @IsEnum(HostingType) hosting?: HostingType;
   @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() features?: string[];
@@ -48,6 +50,8 @@ export class UpdateVehicleDto {
   @ApiPropertyOptional() @IsOptional() @IsString() color?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() vin?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() bodyType?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() trim?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() engine?: string;
   @ApiPropertyOptional({ enum: FuelType }) @IsOptional() @IsEnum(FuelType) fuelType?: FuelType;
   @ApiPropertyOptional({ enum: Transmission }) @IsOptional() @IsEnum(Transmission) transmission?: Transmission;
   @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() features?: string[];

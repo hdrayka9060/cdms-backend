@@ -394,9 +394,10 @@ export class UsersService {
   // ── Bulk invite ─────────────────────────────────────────────────────────
 
   /**
-   * Bulk-invite from a CSV. Columns: firstName, lastName, email, phone, role
-   * (role = role NAME — looked up case-insensitively against the roles
-   * collection). Each row is processed sequentially.
+   * Bulk-invite from a CSV. Columns: firstName, lastName, email, phone,
+   * department, role (role = role NAME — looked up case-insensitively
+   * against the roles collection). `phone` and `department` are optional.
+   * Each row is processed sequentially.
    *
    * Atomicity per row: each row calls `invite()` which is itself transactional
    * — if mail dispatch fails for a row, that row's user is hard-deleted and
@@ -448,6 +449,7 @@ export class UsersService {
       const lastName = String(record.lastName ?? '').trim();
       const roleNameRaw = String(record.role ?? '').trim();
       const phone = String(record.phone ?? '').trim() || undefined;
+      const department = String(record.department ?? '').trim() || undefined;
 
       if (!email || !firstName || !lastName || !roleNameRaw) {
         errors.push(`Row ${rowIndex}: missing required field (firstName/lastName/email/role)`);
@@ -469,6 +471,7 @@ export class UsersService {
             lastName,
             email,
             phone,
+            department,
             roleId: String(role._id),
           },
           inviter,

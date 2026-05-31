@@ -9,7 +9,9 @@ import {
   SellerVehicleInputDto,
 } from './dto/seller-lead.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { AppModule, PermissionAction } from '../../common/permissions';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { PaginationDto } from '../../common/dto/pagination.dto';
 import { SellerLeadStage } from './schemas/seller-lead.schema';
@@ -20,12 +22,13 @@ class SellerLeadQueryDto extends PaginationDto {
 
 @ApiTags('CRM Sellers')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'crm/sellers', version: '1' })
 export class CrmSellersController {
   constructor(private readonly service: CrmSellersService) {}
 
   @Post()
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Create seller lead',
     description:
@@ -38,6 +41,7 @@ export class CrmSellersController {
   }
 
   @Get()
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.VIEW)
   @ApiOperation({ summary: 'List all seller leads', description: 'Paginated list with optional stage filter and search.' })
   @ApiQuery({ name: 'stage', enum: SellerLeadStage, required: false })
   @ApiResponse({ status: 200, description: 'Leads retrieved' })
@@ -47,6 +51,7 @@ export class CrmSellersController {
   }
 
   @Get('pipeline-stats')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get pipeline stats', description: 'Count and total value per stage.' })
   async getPipelineStats() {
     const stats = await this.service.getPipelineStats();
@@ -54,6 +59,7 @@ export class CrmSellersController {
   }
 
   @Get(':id')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get seller lead by ID' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 200, description: 'Lead found' })
@@ -64,6 +70,7 @@ export class CrmSellersController {
   }
 
   @Patch(':id')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Update seller lead', description: 'Update contact, address, stage, notes, assignee, or inspection date.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   async update(@Param('id') id: string, @Body() dto: UpdateSellerLeadDto, @CurrentUser() user: any) {
@@ -72,6 +79,7 @@ export class CrmSellersController {
   }
 
   @Post(':id/vehicles')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Attach a new vehicle to a seller',
     description:
@@ -89,6 +97,7 @@ export class CrmSellersController {
   }
 
   @Delete(':id/vehicles/:vehicleId')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.EDIT)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Detach a vehicle from a seller',
@@ -107,6 +116,7 @@ export class CrmSellersController {
   }
 
   @Post(':id/inspection')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Schedule inspection', description: 'Sets an inspection date and moves lead to Inspection stage.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 201, description: 'Inspection scheduled' })
@@ -116,6 +126,7 @@ export class CrmSellersController {
   }
 
   @Post(':id/communicate')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Log communication',
     description: `Logs a communication event on the lead.
@@ -132,6 +143,7 @@ Message is stored in the communications log with timestamp and sender.`,
   }
 
   @Delete(':id')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.DELETE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Delete seller lead (soft delete)',

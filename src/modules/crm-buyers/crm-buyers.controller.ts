@@ -4,6 +4,9 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CrmBuyersService } from './crm-buyers.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { AppModule, PermissionAction } from '../../common/permissions';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import {
   AddInterestedVehicleDto, BookTestDriveDto, BuyerCommunicationDto,
@@ -13,12 +16,13 @@ import { BuyerLeadStage } from './schemas/buyer-lead.schema';
 
 @ApiTags('CRM Buyers')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'crm/buyers', version: '1' })
 export class CrmBuyersController {
   constructor(private readonly service: CrmBuyersService) {}
 
   @Post()
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Create buyer lead' })
   @ApiResponse({ status: 201, description: 'Buyer lead created' })
   async create(@Body() dto: CreateBuyerLeadDto) {
@@ -27,6 +31,7 @@ export class CrmBuyersController {
   }
 
   @Get()
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.VIEW)
   @ApiOperation({ summary: 'List buyer leads' })
   @ApiQuery({ name: 'stage', enum: BuyerLeadStage, required: false })
   async findAll(@Query() query: any) {
@@ -35,6 +40,7 @@ export class CrmBuyersController {
   }
 
   @Get(':id')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get buyer lead by ID' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 404, description: 'Lead not found' })
@@ -44,6 +50,7 @@ export class CrmBuyersController {
   }
 
   @Patch(':id')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Update buyer lead (name, email, phone, status, notes, etc.)' })
   @ApiParam({ name: 'id' })
   async update(@Param('id') id: string, @Body() dto: UpdateBuyerLeadDto) {
@@ -52,6 +59,7 @@ export class CrmBuyersController {
   }
 
   @Post(':id/interested-vehicles')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Add a vehicle to the buyer\'s interested list' })
   @ApiParam({ name: 'id' })
   async addInterestedVehicle(@Param('id') id: string, @Body() dto: AddInterestedVehicleDto) {
@@ -60,6 +68,7 @@ export class CrmBuyersController {
   }
 
   @Delete(':id/interested-vehicles/:vehicleId')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.EDIT)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Remove a vehicle from the buyer\'s interested list' })
   @ApiParam({ name: 'id' })
@@ -70,6 +79,7 @@ export class CrmBuyersController {
   }
 
   @Post(':id/test-drive')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Book a test drive',
     description: 'Moves the buyer to the Test Drive stage and appends a history entry. Accepts scheduledAt (ISO), assignedTo (User ObjectId), and notes.',
@@ -81,6 +91,7 @@ export class CrmBuyersController {
   }
 
   @Post(':id/communications')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Log a new communication entry' })
   @ApiParam({ name: 'id' })
   async addCommunication(
@@ -93,6 +104,7 @@ export class CrmBuyersController {
   }
 
   @Patch(':id/communications/:commId')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Edit a communication entry' })
   @ApiParam({ name: 'id' })
   @ApiParam({ name: 'commId' })
@@ -106,6 +118,7 @@ export class CrmBuyersController {
   }
 
   @Delete(':id/communications/:commId')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.EDIT)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a communication entry' })
   @ApiParam({ name: 'id' })
@@ -116,6 +129,7 @@ export class CrmBuyersController {
   }
 
   @Get(':id/history')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get buyer purchase/booking history' })
   @ApiParam({ name: 'id' })
   async getHistory(@Param('id') id: string) {
@@ -124,6 +138,7 @@ export class CrmBuyersController {
   }
 
   @Delete(':id')
+  @RequirePermission(AppModule.CRM_BUYERS, PermissionAction.DELETE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete buyer lead (soft)' })
   @ApiParam({ name: 'id' })

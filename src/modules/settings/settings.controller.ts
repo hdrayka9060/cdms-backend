@@ -14,6 +14,7 @@ export class SettingsController {
   constructor(private readonly service: SettingsService) {}
 
   @Get()
+  @RequirePermission(AppModule.SETTINGS, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get dealership settings', description: 'Returns current dealership configuration including contact info, business hours, and notification preferences.' })
   @ApiResponse({ status: 200, description: 'Settings returned' })
   async get() {

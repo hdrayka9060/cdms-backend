@@ -50,8 +50,8 @@ export class MailService implements OnModuleInit {
     const secure = String(this.config.get<string>('MAIL_SECURE') ?? 'false') === 'true';
     this.fromAddress = this.config.get<string>('MAIL_FROM') ?? this.fromAddress;
 
-    // Treat unset / placeholder creds as "dev mode". The .env.example ships
-    // with `your_app_password` as the default which is obviously not real.
+    // Treat unset / placeholder creds as "dev mode". `.env` ships with
+    // `your_app_password` as the default which is obviously not real.
     const credsLookReal =
       !!host && !!user && !!pass && pass !== 'your_app_password' && user !== 'your_email@gmail.com';
 
@@ -123,6 +123,28 @@ export class MailService implements OnModuleInit {
     const html = renderPasswordResetHtml(opts);
     const text = renderPasswordResetText(opts);
     await this.send({ to: opts.to, subject, html, text, contextTag: 'password-reset' });
+  }
+
+  /**
+   * Email a meeting's Google Meet link to its attendees. Used by
+   * CalendarService when a virtual event auto-generates a link — we deliver
+   * the link directly (best-effort) INSTEAD of sending Google Calendar
+   * invites, per the dealer's preference. Multiple recipients are joined into
+   * a single `To`.
+   */
+  async sendMeetingLink(opts: {
+    to: string | string[];
+    eventTitle: string;
+    whenText: string;
+    meetLink: string;
+    organizerName?: string;
+  }): Promise<void> {
+    const to = (Array.isArray(opts.to) ? opts.to : [opts.to]).filter(Boolean).join(', ');
+    if (!to || !opts.meetLink) return;
+    const subject = `Meeting invite: ${opts.eventTitle}`;
+    const html = renderMeetingHtml(opts);
+    const text = renderMeetingText(opts);
+    await this.send({ to, subject, html, text, contextTag: 'meeting-link' });
   }
 
   /**
@@ -247,6 +269,43 @@ function renderPasswordResetText(opts: { firstName?: string; resetUrl: string })
     opts.resetUrl,
     ``,
     `This link expires in 1 hour.`,
+  ].join('\n');
+}
+
+function renderMeetingHtml(opts: {
+  eventTitle: string;
+  whenText: string;
+  meetLink: string;
+  organizerName?: string;
+}): string {
+  const organizer = opts.organizerName ? `${escapeHtml(opts.organizerName)} has invited you to a meeting` : `You've been invited to a meeting`;
+  return `<!doctype html>
+<html><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #1f2937;">
+  <h2 style="color: #111827; margin-bottom: 8px;">${escapeHtml(opts.eventTitle)}</h2>
+  <p>${organizer}.</p>
+  <p style="color:#374151;"><strong>When:</strong> ${escapeHtml(opts.whenText)}</p>
+  <p style="margin: 24px 0;">
+    <a href="${opts.meetLink}" style="display: inline-block; background: #7c3aed; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">Join with Google Meet</a>
+  </p>
+  <p style="font-size: 13px; color: #6b7280;">Or open this link:<br><a href="${opts.meetLink}">${opts.meetLink}</a></p>
+</body></html>`;
+}
+
+function renderMeetingText(opts: {
+  eventTitle: string;
+  whenText: string;
+  meetLink: string;
+  organizerName?: string;
+}): string {
+  return [
+    opts.eventTitle,
+    ``,
+    opts.organizerName ? `${opts.organizerName} has invited you to a meeting.` : `You've been invited to a meeting.`,
+    ``,
+    `When: ${opts.whenText}`,
+    ``,
+    `Join with Google Meet:`,
+    opts.meetLink,
   ].join('\n');
 }
 

@@ -35,15 +35,53 @@ export class RolesSeeder implements OnApplicationBootstrap {
 
   private async seedDefaultRoles(): Promise<void> {
     let inserted = 0;
+    let reconciled = 0;
     for (const seed of DEFAULT_ROLES) {
       const existing = await this.roleModel.findOne({ name: seed.name });
-      if (existing) continue;
-      await this.roleModel.create({ ...seed, isSystem: true });
-      inserted++;
+      if (!existing) {
+        await this.roleModel.create({ ...seed, isSystem: true });
+        inserted++;
+        continue;
+      }
+
+      // Reconciliation pass for system roles only: ensure each MODULE in the
+      // seed exists on the role and includes at least the seeded actions.
+      // We never *remove* actions admins may have added, and we never touch
+      // non-system roles (those are admin-managed custom roles).
+      //
+      // Why this matters: when we extend a default role's responsibilities
+      // (e.g. adding Inventory:view to Marketing so /dealer-website can
+      // fetch vehicles), existing deployments would silently miss the
+      // permission until the admin manually re-edited the role. This loop
+      // makes the seed the canonical floor for system roles.
+      if (!existing.isSystem) continue;
+
+      const merged: { module: string; actions: string[] }[] = (existing.permissions ?? []).map((p: any) => ({
+        module: p.module,
+        actions: [...(p.actions ?? [])],
+      }));
+      let dirty = false;
+      for (const seedPerm of seed.permissions) {
+        let row = merged.find((m) => m.module === seedPerm.module);
+        if (!row) {
+          row = { module: seedPerm.module, actions: [] };
+          merged.push(row);
+          dirty = true;
+        }
+        for (const a of seedPerm.actions) {
+          if (!row.actions.includes(a)) {
+            row.actions.push(a);
+            dirty = true;
+          }
+        }
+      }
+      if (dirty) {
+        await this.roleModel.updateOne({ _id: existing._id }, { $set: { permissions: merged } });
+        reconciled++;
+      }
     }
-    if (inserted > 0) {
-      this.logger.log(`Seeded ${inserted} default role(s)`);
-    }
+    if (inserted > 0) this.logger.log(`Seeded ${inserted} default role(s)`);
+    if (reconciled > 0) this.logger.log(`Reconciled ${reconciled} system role(s) with updated default permissions`);
   }
 
   private async migrateLegacyUsers(): Promise<void> {

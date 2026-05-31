@@ -82,6 +82,11 @@ export const DEFAULT_ROLES: {
       { module: AppModule.LEADS, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.CALENDAR, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.COMMUNICATION, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
+      // Staff:view is a *lookup* permission — Sales Staff need to read the
+      // users directory to populate assignee dropdowns on lead detail,
+      // calendar event, and buyer detail pages. They cannot edit/delete
+      // staff, only see the names.
+      { module: AppModule.STAFF, actions: [PermissionAction.VIEW] },
     ],
   },
   {
@@ -92,6 +97,11 @@ export const DEFAULT_ROLES: {
       { module: AppModule.MARKETING, actions: [PermissionAction.VIEW, PermissionAction.EDIT, PermissionAction.DELETE] },
       { module: AppModule.DEALER_WEBSITE, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.MARKETPLACE, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
+      // Inventory:view + :edit are required for Marketing to manage which
+      // vehicles appear on the public dealer website + marketplace. The UI
+      // for those features reads /inventory and toggles vehicle.status —
+      // both gated by Inventory permissions on the backend.
+      { module: AppModule.INVENTORY, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
     ],
   },
   {

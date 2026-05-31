@@ -6,16 +6,20 @@ import { v4 as uuidv4 } from 'uuid';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiParam, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { SupportService } from './support.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { RequirePermission } from '../../common/decorators/require-permission.decorator';
+import { AppModule, PermissionAction } from '../../common/permissions';
 import { TicketStatus } from './schemas/ticket.schema';
 
 @ApiTags('Support')
 @ApiBearerAuth('access-token')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'support', version: '1' })
 export class SupportController {
   constructor(private readonly service: SupportService) {}
 
   @Post('tickets')
+  @RequirePermission(AppModule.SUPPORT, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Raise a support ticket',
     description: `Creates a new support ticket.
@@ -34,6 +38,7 @@ export class SupportController {
   }
 
   @Get('tickets')
+  @RequirePermission(AppModule.SUPPORT, PermissionAction.VIEW)
   @ApiOperation({ summary: 'List all tickets', description: 'Filter by status, priority, category.' })
   async findAll(@Query() query: any) {
     const result = await this.service.findAll(query);
@@ -41,6 +46,7 @@ export class SupportController {
   }
 
   @Get('stats')
+  @RequirePermission(AppModule.SUPPORT, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get ticket stats by status' })
   async getStats() {
     const data = await this.service.getStats();
@@ -48,6 +54,7 @@ export class SupportController {
   }
 
   @Get('tickets/:id')
+  @RequirePermission(AppModule.SUPPORT, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get ticket detail + communication thread' })
   @ApiParam({ name: 'id' })
   @ApiResponse({ status: 404, description: 'Ticket not found' })
@@ -57,6 +64,7 @@ export class SupportController {
   }
 
   @Post('tickets/:id/reply')
+  @RequirePermission(AppModule.SUPPORT, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Add reply to ticket thread', description: 'Appends a message to the ticket communication thread.' })
   @ApiParam({ name: 'id' })
   async reply(@Param('id') id: string, @Body() dto: any) {
@@ -65,6 +73,7 @@ export class SupportController {
   }
 
   @Patch('tickets/:id/status')
+  @RequirePermission(AppModule.SUPPORT, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Update ticket status', description: 'Change ticket status. Setting to resolved records resolvedAt timestamp.' })
   @ApiParam({ name: 'id' })
   async updateStatus(@Param('id') id: string, @Body() dto: { status: TicketStatus; assignedTo?: string }) {
@@ -73,6 +82,7 @@ export class SupportController {
   }
 
   @Post('tickets/:id/attachments')
+  @RequirePermission(AppModule.SUPPORT, PermissionAction.EDIT)
   @UseInterceptors(FilesInterceptor('files', 5, { storage: diskStorage({ destination: './uploads/tickets', filename: (req, file, cb) => cb(null, `${uuidv4()}${extname(file.originalname)}`) }) }))
   @ApiConsumes('multipart/form-data')
   @ApiBody({ description: 'Upload up to 5 files', schema: { type: 'object', properties: { files: { type: 'array', items: { type: 'string', format: 'binary' } } } } })

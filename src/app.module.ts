@@ -11,6 +11,7 @@ import { UsersModule } from './modules/users/users.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { ActivityModule } from './modules/activity/activity.module';
 import { MailModule } from './modules/mail/mail.module';
+import { GoogleMeetModule } from './modules/google-meet/google-meet.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { CrmSellersModule } from './modules/crm-sellers/crm-sellers.module';
@@ -97,6 +98,9 @@ import { SettingsModule } from './modules/settings/settings.module';
     // MailModule is @Global() too — UsersService + AuthService need to send
     // mail and we don't want every feature module to import MailModule.
     MailModule,
+    // GoogleMeetModule is @Global() — CalendarService injects GoogleMeetService
+    // to provision real Meet links via the Google Calendar API.
+    GoogleMeetModule,
     DashboardModule,
     InventoryModule,
     CrmSellersModule,

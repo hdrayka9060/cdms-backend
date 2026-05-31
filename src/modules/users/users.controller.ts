@@ -88,7 +88,7 @@ Token expires in 7 days.`,
   @UseInterceptors(FileInterceptor('file', { storage: memoryStorage() }))
   @ApiConsumes('multipart/form-data')
   @ApiBody({
-    description: 'CSV file with columns: firstName, lastName, email, phone, role (role = role NAME, e.g. "Sales Staff")',
+    description: 'CSV file with columns: firstName, lastName, email, phone, department, role (role = role NAME, e.g. "Sales Staff"; phone + department are optional)',
     schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } },
   })
   @ApiOperation({

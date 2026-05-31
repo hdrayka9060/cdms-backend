@@ -2,6 +2,7 @@ import {
   Injectable, Logger, NotFoundException, ConflictException, Inject, forwardRef,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Model, FilterQuery, Types, isValidObjectId } from 'mongoose';
 import { parse } from 'csv-parse/sync';
 import { Vehicle, VehicleDocument, VehicleStatus } from './schemas/vehicle.schema';
@@ -339,29 +340,64 @@ export class InventoryService {
     const errors: string[] = [];
     let created = 0;
 
+    // Enum columns (fuelType/transmission/hosting/status) must be lowercased to
+    // match the schema enums, and an empty cell must become `undefined` — an
+    // empty string would fail Mongoose enum validation. Free-text columns can
+    // pass through as-is (their schema default is '').
+    const enumCell = (v?: string): any => {
+      const s = (v ?? '').trim();
+      return s === '' ? undefined : s.toLowerCase();
+    };
+    const str = (v?: string): string => (v ?? '').toString().trim();
+
+    let row = 0;
     for (const record of records) {
+      row++;
+      // A readable row label for error messages.
+      const label = str(record.vehicleNumber) || str(record.title) ||
+        `${str(record.company)} ${str(record.model)}`.trim() || `row ${row}`;
+
+      // Required fields (mirror the Add Vehicle form). `title` is intentionally
+      // NOT required — it's auto-built from year/company/model when blank.
+      const year = parseInt(record.year);
+      const price = parseFloat(record.price);
+      const missing: string[] = [];
+      if (!str(record.company)) missing.push('company');
+      if (!str(record.model)) missing.push('model');
+      if (!str(record.year) || Number.isNaN(year)) missing.push('year');
+      if (!str(record.price) || Number.isNaN(price)) missing.push('price');
+      if (missing.length) {
+        errors.push(`Row ${label}: missing/invalid required field(s): ${missing.join(', ')}`);
+        continue;
+      }
+
       try {
         await this.create(
           {
-            vehicleNumber: record.vehicleNumber,
-            title: record.title || `${record.year} ${record.company} ${record.model}`,
-            company: record.company,
-            model: record.model,
-            year: parseInt(record.year),
+            vehicleNumber: str(record.vehicleNumber) || undefined,
+            title: str(record.title) || `${year} ${str(record.company)} ${str(record.model)}`,
+            company: str(record.company),
+            model: str(record.model),
+            year,
             km: parseInt(record.km || '0'),
-            price: parseFloat(record.price),
+            price,
             discount: parseFloat(record.discount || '0'),
             owners: parseInt(record.owners || '1'),
-            fuelType: record.fuelType,
-            transmission: record.transmission,
+            fuelType: enumCell(record.fuelType),
+            transmission: enumCell(record.transmission),
             color: record.color,
+            vin: record.vin,
+            bodyType: record.bodyType,
+            trim: record.trim,
+            engine: record.engine,
+            hosting: enumCell(record.hosting),
             description: record.description,
           },
           userId,
         );
         created++;
       } catch (err) {
-        errors.push(`Row ${record.vehicleNumber || '?'}: ${err.message}`);
+        errors.push(`Row ${label}: ${err.message}`);
       }
     }
 
@@ -381,5 +417,77 @@ export class InventoryService {
     ]);
 
     return { total, sold, unsold, pending, avgPrice: avgPrice[0]?.avg || 0 };
+  }
+
+  /**
+   * Hourly cron: auto-expire 'new' vehicles to 'pending' after 2 days.
+   *
+   * Spec: newly added vehicles start as `new` (schema default). If nobody
+   * moves them off `new` within 48 hours of createdAt, the system flips
+   * them to `pending`. Any manual status change moves the vehicle out of
+   * this query's scope, so the timer is effectively "since createdAt,
+   * while still NEW".
+   *
+   * Runs hourly so the worst-case slop past the 2-day mark is ~1 hour.
+   * Daily would be lower-overhead but feels too coarse for the 2-day SLA.
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async expireNewVehicles(): Promise<void> {
+    const cutoff = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const stale = await this.vehicleModel
+      .find({
+        status: VehicleStatus.NEW,
+        createdAt: { $lt: cutoff },
+        isDeleted: false,
+      })
+      .select('_id title vehicleNumber')
+      .lean();
+
+    if (stale.length === 0) return;
+
+    const ids = stale.map((v) => v._id);
+    await this.vehicleModel.updateMany(
+      { _id: { $in: ids } },
+      {
+        $set: { status: VehicleStatus.PENDING },
+        $push: {
+          history: {
+            field: 'status',
+            value: VehicleStatus.NEW,
+            newValue: VehicleStatus.PENDING,
+            changedAt: new Date(),
+            changedBy: 'system:auto-expire',
+          },
+        },
+      },
+    );
+    this.logger.log(
+      `auto-expire: flipped ${stale.length} 'new' vehicle(s) → 'pending' (>2 days)`,
+    );
+
+    // Per-vehicle activity log so the Dashboard "Recent Activity" feed
+    // surfaces the change. Best-effort: the status update has already
+    // landed atomically above; activity-log failures must not throw.
+    for (const v of stale) {
+      try {
+        await this.activity.log({
+          module: 'inventory',
+          action: 'status-changed',
+          entity: 'Vehicle',
+          entityId: v._id,
+          label: `${v.title} (${v.vehicleNumber}) auto-expired: new → pending`,
+          meta: {
+            from: VehicleStatus.NEW,
+            to: VehicleStatus.PENDING,
+            auto: true,
+            reason: '2-day timeout',
+          },
+        });
+      } catch (err) {
+        this.logger.warn(
+          `activity log failed for auto-expire vehicleId=${String(v._id)}: ${err}`,
+        );
+      }
+    }
   }
 }
