@@ -12,6 +12,7 @@ import { PaginatedResult } from '../../common/dto/pagination.dto';
 import { SellerLead, SellerLeadDocument } from '../crm-sellers/schemas/seller-lead.schema';
 import { AccountingService } from '../accounting/accounting.service';
 import { ActivityService } from '../activity/activity.service';
+import { VinDecodeService, DecodedVehicleFields } from './vin-decode.service';
 
 @Injectable()
 export class InventoryService {
@@ -24,6 +25,7 @@ export class InventoryService {
     // would deadlock without it.
     @Inject(forwardRef(() => AccountingService)) private accountingService: AccountingService,
     private readonly activity: ActivityService,
+    private readonly vinDecode: VinDecodeService,
   ) {}
 
   /**
@@ -41,6 +43,21 @@ export class InventoryService {
       vehicleNumber = await this.generateUniqueVehicleNumber();
     }
 
+    // VIN uniqueness: a non-deleted vehicle may not share a VIN with another.
+    // A soft-deleted vehicle with the same VIN does NOT block — re-adding a car
+    // whose previous listing was deleted is allowed. Matched case-insensitively
+    // to catch legacy mixed-case rows; new rows are stored upper-cased.
+    const vinNorm = (dto.vin ?? '').trim().toUpperCase();
+    if (vinNorm) {
+      const escaped = vinNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const dupe = await this.vehicleModel
+        .findOne({ isDeleted: false, vin: { $regex: `^${escaped}$`, $options: 'i' } })
+        .select('vehicleNumber');
+      if (dupe) {
+        throw new ConflictException(`A vehicle with VIN ${vinNorm} already exists (${dupe.vehicleNumber}).`);
+      }
+    }
+
     const explicitSeller = sellerId ?? dto.seller;
     const seller =
       explicitSeller && isValidObjectId(explicitSeller)
@@ -52,6 +69,7 @@ export class InventoryService {
       vehicleNumber,
       addedBy: userId,
       seller,
+      vin: vinNorm || undefined,
     });
     const saved = await vehicle.save();
     await this.activity.log({
@@ -473,15 +491,15 @@ export class InventoryService {
     return vehicle.traffic;
   }
 
-  async bulkUpload(csvBuffer: Buffer, userId: string): Promise<{ created: number; errors: string[] }> {
+  async bulkUpload(
+    csvBuffer: Buffer,
+    userId: string,
+  ): Promise<{ created: number; decoded: number; errors: string[]; totalRows: number }> {
     const records = parse(csvBuffer, {
       columns: true,
       skip_empty_lines: true,
       trim: true,
     });
-
-    const errors: string[] = [];
-    let created = 0;
 
     // Enum columns (fuelType/transmission/hosting/status) must be lowercased to
     // match the schema enums, and an empty cell must become `undefined` — an
@@ -493,24 +511,65 @@ export class InventoryService {
     };
     const str = (v?: string): string => (v ?? '').toString().trim();
 
+    // ── Decode every VIN in the file up front via NHTSA's batch endpoint ──
+    // (chunked ≤50/call, sequential, best-effort). One round-trip per 50 rows
+    // instead of one per row. Failed chunks just leave their VINs undecoded.
+    const vinItems: { vin: string; year?: number }[] = [];
+    for (const rec of records) {
+      const vin = str(rec.vin).toUpperCase();
+      if (this.vinDecode.isValidVin(vin)) {
+        const y = parseInt(str(rec.year), 10);
+        vinItems.push({ vin, year: Number.isFinite(y) ? y : undefined });
+      }
+    }
+    let decodedMap = new Map<string, DecodedVehicleFields>();
+    if (vinItems.length) {
+      decodedMap = await this.vinDecode.decodeBatch(vinItems);
+      this.logger.log(`bulkUpload: decoded ${decodedMap.size}/${vinItems.length} VIN(s) via NHTSA vPIC`);
+    }
+
+    const errors: string[] = [];
+    const seenVins = new Set<string>();
+    let created = 0;
+    let decodedUsed = 0;
     let row = 0;
+
     for (const record of records) {
       row++;
-      // A readable row label for error messages.
-      const label = str(record.vehicleNumber) || str(record.title) ||
-        `${str(record.company)} ${str(record.model)}`.trim() || `row ${row}`;
+      const vinNorm = str(record.vin).toUpperCase();
+      const decoded = vinNorm ? decodedMap.get(vinNorm) : undefined;
 
-      // Required fields (mirror the Add Vehicle form). `title` is intentionally
-      // NOT required — it's auto-built from year/company/model when blank.
-      const year = parseInt(record.year);
-      const price = parseFloat(record.price);
+      // Merge rule: an explicit CSV cell wins; the VIN decode fills only the
+      // cells the CSV left blank. Business fields the VIN can't know (price, km,
+      // color, …) always come from the CSV.
+      const company = str(record.company) || decoded?.company || '';
+      const model = str(record.model) || decoded?.model || '';
+      const yearCsv = parseInt(str(record.year), 10);
+      const year = Number.isFinite(yearCsv) ? yearCsv : decoded?.year;
+      const price = parseFloat(str(record.price));
+
+      const label =
+        str(record.vehicleNumber) ||
+        str(record.title) ||
+        `${company} ${model}`.trim() ||
+        (vinNorm ? `VIN ${vinNorm}` : `row ${row}`);
+
+      // Intra-file duplicate VIN guard (DB duplicates are caught by create()).
+      if (vinNorm && seenVins.has(vinNorm)) {
+        errors.push(`Row ${label}: duplicate VIN ${vinNorm} appears earlier in the file — skipped.`);
+        continue;
+      }
+
+      // Required fields. `title` is auto-built when blank. company/model/year
+      // may now come from the VIN decode; price must always be in the CSV.
       const missing: string[] = [];
-      if (!str(record.company)) missing.push('company');
-      if (!str(record.model)) missing.push('model');
-      if (!str(record.year) || Number.isNaN(year)) missing.push('year');
+      if (!company) missing.push('company');
+      if (!model) missing.push('model');
+      if (year === undefined || Number.isNaN(year)) missing.push('year');
       if (!str(record.price) || Number.isNaN(price)) missing.push('price');
       if (missing.length) {
-        errors.push(`Row ${label}: missing/invalid required field(s): ${missing.join(', ')}`);
+        const hint = vinNorm && !decoded ? ' (VIN did not decode)' : '';
+        errors.push(`Row ${label}: missing/invalid required field(s): ${missing.join(', ')}${hint}`);
         continue;
       }
 
@@ -518,33 +577,35 @@ export class InventoryService {
         await this.create(
           {
             vehicleNumber: str(record.vehicleNumber) || undefined,
-            title: str(record.title) || `${year} ${str(record.company)} ${str(record.model)}`,
-            company: str(record.company),
-            model: str(record.model),
-            year,
+            title: str(record.title) || decoded?.title || `${year} ${company} ${model}`,
+            company,
+            model,
+            year: year as number,
             km: parseInt(record.km || '0'),
             price,
             discount: parseFloat(record.discount || '0'),
             owners: parseInt(record.owners || '1'),
-            fuelType: enumCell(record.fuelType),
-            transmission: enumCell(record.transmission),
+            fuelType: enumCell(record.fuelType) ?? decoded?.fuelType,
+            transmission: enumCell(record.transmission) ?? decoded?.transmission,
             color: record.color,
-            vin: record.vin,
-            bodyType: record.bodyType,
-            trim: record.trim,
-            engine: record.engine,
+            vin: vinNorm || undefined,
+            bodyType: str(record.bodyType) || decoded?.bodyType,
+            trim: str(record.trim) || decoded?.trim,
+            engine: str(record.engine) || decoded?.engine,
             hosting: enumCell(record.hosting),
             description: record.description,
           },
           userId,
         );
         created++;
+        if (decoded) decodedUsed++;
+        if (vinNorm) seenVins.add(vinNorm);
       } catch (err) {
         errors.push(`Row ${label}: ${err.message}`);
       }
     }
 
-    return { created, errors };
+    return { created, decoded: decodedUsed, errors, totalRows: records.length };
   }
 
   async getStats(): Promise<any> {

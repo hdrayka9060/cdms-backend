@@ -11,6 +11,7 @@ import {
   ApiConsumes, ApiBody,
 } from '@nestjs/swagger';
 import { InventoryService } from './inventory.service';
+import { VinDecodeService } from './vin-decode.service';
 import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto, CreateVehicleSpendDto, UpdateVehicleSpendDto } from './dto/vehicle.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
@@ -28,7 +29,35 @@ const imageStorage = diskStorage({
 @UseGuards(JwtAuthGuard, PermissionsGuard)
 @Controller({ path: 'inventory', version: '1' })
 export class InventoryController {
-  constructor(private readonly inventoryService: InventoryService) {}
+  constructor(
+    private readonly inventoryService: InventoryService,
+    private readonly vinDecode: VinDecodeService,
+  ) {}
+
+  /**
+   * GET /api/v1/inventory/vin/:vin/decode
+   *
+   * Server-side NHTSA vPIC lookup that auto-fills the Add-Vehicle form. The
+   * caller reviews/edits the returned specs before saving. Read-only (gated by
+   * INVENTORY:view); the form's Save button enforces INVENTORY:edit separately.
+   * Works for any US/Canada-market VIN.
+   */
+  @Get('vin/:vin/decode')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.VIEW)
+  @ApiOperation({
+    summary: 'Decode a VIN via NHTSA vPIC',
+    description:
+      'Returns make, model, year, trim, engine, fuel, transmission, body type, ' +
+      'country of origin and a suggested title. Pass an optional `?year=` hint to ' +
+      'improve accuracy. 400 if the VIN is malformed/undecodable, 503 if NHTSA is down.',
+  })
+  @ApiParam({ name: 'vin', example: '5N1AT2MV8GC776183' })
+  @ApiResponse({ status: 200, description: 'Decoded vehicle specs' })
+  @ApiResponse({ status: 400, description: 'Invalid or undecodable VIN' })
+  async decodeVin(@Param('vin') vin: string, @Query('year') year?: string) {
+    const data = await this.vinDecode.decodeOne(vin, year ? parseInt(year, 10) : undefined);
+    return { message: 'VIN decoded', data };
+  }
 
   /**
    * POST /api/v1/inventory
@@ -235,18 +264,20 @@ These are cost-of-goods, not operating expenses: the total is folded into the ve
   @ApiConsumes('multipart/form-data')
   @ApiBody({ description: 'CSV file with vehicle data', schema: { type: 'object', properties: { file: { type: 'string', format: 'binary' } } } })
   @ApiOperation({
-    summary: 'Bulk upload vehicles via CSV',
+    summary: 'Bulk upload vehicles via CSV (with VIN auto-decode)',
     description: `Uploads a CSV file to create multiple vehicles at once.
 
 **CSV Columns** (mirror the Add Vehicle form): title, company, model, trim, year, engine, fuelType, transmission, bodyType, vin, km, price, discount, owners, color, hosting, description (plus optional vehicleNumber — auto-generated if blank)
 
-**Required:** company, model, year, price. (title is optional — auto-built from year/company/model when blank.) Rows missing a required field are skipped and reported in \`errors\`.
+**VIN auto-decode:** every valid \`vin\` in the file is decoded up front via NHTSA's batch endpoint (≤50 VINs per request, chunked). Decoded specs (make/model/year/trim/engine/fuel/transmission/bodyType) **fill only the cells the CSV left blank** — an explicit CSV value always wins. So the minimal CSV is just \`vin,price\`. Decode is best-effort: if NHTSA is unreachable, those rows fall back to their CSV values.
+
+**Required (after decode):** company, model, year, price. company/model/year may come from the VIN; price must be in the CSV. Rows still missing a required field are skipped and reported in \`errors\`.
 
 **Enum columns (lowercase):** fuelType = petrol|diesel|electric|hybrid|cng · transmission = manual|automatic|cvt · hosting = self|platform. Blank enum cells fall back to schema defaults.
 
 **Notes:**
-- Skip existing vehicle numbers
-- Returns count of created vehicles and per-row errors`,
+- Duplicate VINs (already in inventory, or repeated within the file) are skipped and reported
+- Returns \`{ created, decoded, errors[], totalRows }\``,
   })
   @ApiResponse({ status: 201, description: 'Bulk upload completed with results' })
   async bulkUpload(@UploadedFile() file: Express.Multer.File, @CurrentUser() user: any) {

@@ -3,6 +3,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { MulterModule } from '@nestjs/platform-express';
 import { InventoryController } from './inventory.controller';
 import { InventoryService } from './inventory.service';
+import { VinDecodeService } from './vin-decode.service';
 import { Vehicle, VehicleSchema } from './schemas/vehicle.schema';
 import { SellerLead, SellerLeadSchema } from '../crm-sellers/schemas/seller-lead.schema';
 import { AccountingModule } from '../accounting/accounting.module';
@@ -22,7 +23,7 @@ import { AccountingModule } from '../accounting/accounting.module';
     MulterModule.register({ dest: './uploads/vehicles' }),
   ],
   controllers: [InventoryController],
-  providers: [InventoryService],
+  providers: [InventoryService, VinDecodeService],
   exports: [InventoryService],
 })
 export class InventoryModule {}
