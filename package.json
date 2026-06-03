@@ -67,6 +67,7 @@
     "@typescript-eslint/parser": "^7.0.2",
     "eslint": "^8.57.0",
     "prettier": "^3.2.5",
+    "socket.io-client": "^4.8.3",
     "ts-jest": "^29.1.2",
     "ts-loader": "^9.5.1",
     "ts-node": "^10.9.2",

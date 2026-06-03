@@ -24,6 +24,7 @@ import { MarketingModule } from './modules/marketing/marketing.module';
 import { DealerWebsiteModule } from './modules/dealer-website/dealer-website.module';
 import { SupportModule } from './modules/support/support.module';
 import { CommunicationModule } from './modules/communication/communication.module';
+import { MessagingModule } from './modules/messaging/messaging.module';
 import { SettingsModule } from './modules/settings/settings.module';
 
 @Module({
@@ -113,6 +114,7 @@ import { SettingsModule } from './modules/settings/settings.module';
     DealerWebsiteModule,
     SupportModule,
     CommunicationModule,
+    MessagingModule,
     SettingsModule,
   ],
 })

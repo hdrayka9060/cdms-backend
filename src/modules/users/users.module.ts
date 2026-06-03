@@ -5,6 +5,7 @@ import { UsersService } from './users.service';
 import { UsersMigrator } from './users.migrator';
 import { User, UserSchema } from './schemas/user.schema';
 import { RolesModule } from '../roles/roles.module';
+import { MessagingModule } from '../messaging/messaging.module';
 
 /**
  * UsersModule imports RolesModule so UsersService can:
@@ -20,6 +21,10 @@ import { RolesModule } from '../roles/roles.module';
   imports: [
     MongooseModule.forFeature([{ name: User.name, schema: UserSchema }]),
     forwardRef(() => RolesModule),
+    // For the staff-removal cascade: UsersService.softDelete → MessagingService
+    // .onUserRemoved. forwardRef is defensive — MessagingModule re-registers the
+    // User schema, so guard against any future cycle.
+    forwardRef(() => MessagingModule),
   ],
   controllers: [UsersController],
   providers: [UsersService, UsersMigrator],

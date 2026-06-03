@@ -22,6 +22,7 @@ import { PaginationDto, PaginatedResult } from '../../common/dto/pagination.dto'
 import { RolesService } from '../roles/roles.service';
 import { ActivityService } from '../activity/activity.service';
 import { MailService } from '../mail/mail.service';
+import { MessagingService } from '../messaging/messaging.service';
 
 /** 7 days. Long enough that a Friday-afternoon invite still works on Monday. */
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -45,6 +46,7 @@ export class UsersService {
     private readonly activity: ActivityService,
     private readonly mail: MailService,
     private readonly config: ConfigService,
+    private readonly messaging: MessagingService,
   ) {}
 
   // ── Generic CRUD ────────────────────────────────────────────────────────
@@ -210,6 +212,16 @@ export class UsersService {
       });
     } catch (err) {
       this.logger.warn(`activity log failed for user delete id=${id}: ${err}`);
+    }
+
+    // Cascade: drop the removed user from every conversation (direct + group).
+    // Surviving members keep the thread with that slot shown as "User left" and
+    // the history intact. Best-effort — a messaging hiccup must not block the
+    // delete itself.
+    try {
+      await this.messaging.onUserRemoved(id);
+    } catch (err) {
+      this.logger.warn(`messaging cascade failed for user delete id=${id}: ${err}`);
     }
   }
 
