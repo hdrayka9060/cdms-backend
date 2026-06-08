@@ -16,6 +16,7 @@ export enum AppModule {
   MARKETING = 'Digital Marketing',
   DEALER_WEBSITE = 'Dealer Website',
   MARKETPLACE = 'Dealer Marketplace',
+  FACEBOOK_LISTINGS = 'Facebook Listings',
   CALENDAR = 'Calendar',
   COMMUNICATION = 'Communication',
   SUPPORT = 'Support',
@@ -70,6 +71,7 @@ export const DEFAULT_ROLES: {
       { module: AppModule.CALENDAR, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.COMMUNICATION, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.STAFF, actions: [PermissionAction.VIEW] },
+      { module: AppModule.FACEBOOK_LISTINGS, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
     ],
   },
   {
@@ -87,6 +89,7 @@ export const DEFAULT_ROLES: {
       // calendar event, and buyer detail pages. They cannot edit/delete
       // staff, only see the names.
       { module: AppModule.STAFF, actions: [PermissionAction.VIEW] },
+      { module: AppModule.FACEBOOK_LISTINGS, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
     ],
   },
   {
@@ -97,6 +100,8 @@ export const DEFAULT_ROLES: {
       { module: AppModule.MARKETING, actions: [PermissionAction.VIEW, PermissionAction.EDIT, PermissionAction.DELETE] },
       { module: AppModule.DEALER_WEBSITE, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.MARKETPLACE, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
+      // Facebook publishing + lead management is a marketing surface — full access.
+      { module: AppModule.FACEBOOK_LISTINGS, actions: [PermissionAction.VIEW, PermissionAction.EDIT, PermissionAction.DELETE] },
       // Inventory:view + :edit are required for Marketing to manage which
       // vehicles appear on the public dealer website + marketplace. The UI
       // for those features reads /inventory and toggles vehicle.status —

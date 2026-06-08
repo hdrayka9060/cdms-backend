@@ -13,6 +13,10 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['log', 'error', 'warn', 'debug'],
+    // Buffer the raw request body (exposed as `req.rawBody`) so the Facebook
+    // webhook controller can verify the X-Hub-Signature-256 HMAC against the
+    // exact bytes Facebook signed. Harmless for every other route.
+    rawBody: true,
   });
 
   const configService = app.get(ConfigService);
@@ -111,6 +115,7 @@ All responses follow the standard envelope:
     .addTag('Support', 'Support ticket system')
     .addTag('Communication', 'Unified communication logs')
     .addTag('Settings', 'Dealership configuration')
+    .addTag('Facebook', 'Facebook listings & connected accounts')
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);

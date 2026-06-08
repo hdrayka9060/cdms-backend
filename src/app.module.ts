@@ -26,6 +26,9 @@ import { SupportModule } from './modules/support/support.module';
 import { CommunicationModule } from './modules/communication/communication.module';
 import { MessagingModule } from './modules/messaging/messaging.module';
 import { SettingsModule } from './modules/settings/settings.module';
+import { FacebookApiModule } from './modules/facebook-api/facebook-api.module';
+import { FacebookModule } from './modules/facebook/facebook.module';
+import { StorageModule } from './common/storage/storage.module';
 
 @Module({
   providers: [
@@ -102,6 +105,13 @@ import { SettingsModule } from './modules/settings/settings.module';
     // GoogleMeetModule is @Global() — CalendarService injects GoogleMeetService
     // to provision real Meet links via the Google Calendar API.
     GoogleMeetModule,
+    // FacebookApiModule is @Global() — Facebook feature services inject the
+    // Graph wrapper (FacebookApiService) without importing the module.
+    FacebookApiModule,
+    // StorageModule is @Global() — feature services inject StorageService to
+    // store media on Amazon S3 (public URLs Facebook can fetch), with a
+    // local-disk fallback when S3_* is unset.
+    StorageModule,
     DashboardModule,
     InventoryModule,
     CrmSellersModule,
@@ -116,6 +126,7 @@ import { SettingsModule } from './modules/settings/settings.module';
     CommunicationModule,
     MessagingModule,
     SettingsModule,
+    FacebookModule,
   ],
 })
 export class AppModule {}

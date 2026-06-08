@@ -37,15 +37,26 @@ H_JSON="Content-Type: application/json"
 echo "token len=${#TOKEN}"
 
 # Delete any non-deleted test vehicles so the run is repeatable (by VIN or marker).
+# Paginates through ALL pages at limit=100 (the API's @Max(100) cap — asking for
+# more 400s) so the target vehicles are found even when the dev DB has
+# accumulated hundreds of leftover smoke-test vehicles across runs.
 cleanup() {
-  local ids
-  ids=$(curl -s "$API/inventory?limit=200" -H "$H_AUTH" | node -e '
-    let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{
-      const j=JSON.parse(s);const list=j.data?.data||j.data||[];
-      const vins=["'"$NISSAN"'","'"$TESLA"'"];
-      for(const v of list){const vin=String(v.vin||"").toUpperCase();
-        if(vins.includes(vin)||v.company==="'"$HONDA_CO"'")console.log(v._id);}
-    }catch(e){}})')
+  local ids="" page=1 totalPages=1 parsed
+  while [ "$page" -le "$totalPages" ]; do
+    parsed=$(curl -s "$API/inventory?limit=100&page=$page" -H "$H_AUTH" | node -e '
+      let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{
+        const j=JSON.parse(s);const d=j.data||{};const list=d.data||(Array.isArray(d)?d:[]);
+        const tp=d.totalPages||1;
+        const vins=["'"$NISSAN"'","'"$TESLA"'"];
+        const ids=[];
+        for(const v of list){const vin=String(v.vin||"").toUpperCase();
+          if(vins.includes(vin)||v.company==="'"$HONDA_CO"'")ids.push(v._id);}
+        process.stdout.write(tp+"\n"+ids.join(" "));
+      }catch(e){process.stdout.write("1\n");}})')
+    totalPages=$(printf '%s' "$parsed" | head -1)
+    ids="$ids $(printf '%s' "$parsed" | tail -n +2)"
+    page=$((page+1))
+  done
   for id in $ids; do curl -s -X DELETE "$API/inventory/$id" -H "$H_AUTH" >/dev/null; done
 }
 log "Pre-clean leftover test vehicles"

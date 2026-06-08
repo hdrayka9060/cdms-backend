@@ -3,26 +3,20 @@ import {
   UploadedFiles, UseInterceptors, UploadedFile, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { FilesInterceptor, FileInterceptor } from '@nestjs/platform-express';
-import { diskStorage, memoryStorage } from 'multer';
-import { extname } from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import { memoryStorage } from 'multer';
 import {
   ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiParam,
   ApiConsumes, ApiBody,
 } from '@nestjs/swagger';
 import { InventoryService } from './inventory.service';
 import { VinDecodeService } from './vin-decode.service';
+import { StorageService } from '../../common/storage/storage.service';
 import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto, CreateVehicleSpendDto, UpdateVehicleSpendDto } from './dto/vehicle.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AppModule, PermissionAction } from '../../common/permissions';
-
-const imageStorage = diskStorage({
-  destination: './uploads/vehicles',
-  filename: (req, file, cb) => cb(null, `${uuidv4()}${extname(file.originalname)}`),
-});
 
 @ApiTags('Inventory')
 @ApiBearerAuth('access-token')
@@ -32,6 +26,7 @@ export class InventoryController {
   constructor(
     private readonly inventoryService: InventoryService,
     private readonly vinDecode: VinDecodeService,
+    private readonly storage: StorageService,
   ) {}
 
   /**
@@ -165,16 +160,26 @@ export class InventoryController {
    */
   @Post(':id/images')
   @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
-  @UseInterceptors(FilesInterceptor('images', 10, { storage: imageStorage }))
+  @UseInterceptors(
+    FilesInterceptor('images', 10, {
+      storage: memoryStorage(),
+      limits: { fileSize: 10 * 1024 * 1024 },
+    }),
+  )
   @ApiConsumes('multipart/form-data')
   @ApiBody({ description: 'Upload up to 10 vehicle images', schema: { type: 'object', properties: { images: { type: 'array', items: { type: 'string', format: 'binary' } } } } })
-  @ApiOperation({ summary: 'Upload vehicle images', description: 'Uploads 1–10 images for a vehicle. Max 10MB each. Formats: jpg, jpeg, png, webp.' })
+  @ApiOperation({ summary: 'Upload vehicle images', description: 'Uploads 1–10 images for a vehicle. Max 10MB each. Formats: jpg, jpeg, png, webp. Stored on Amazon S3 (public URL) when configured, else local /uploads.' })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 201, description: 'Images uploaded successfully' })
   async uploadImages(@Param('id') id: string, @UploadedFiles() files: Express.Multer.File[]) {
     if (!files?.length) throw new Error('No images uploaded');
-    const paths = files.map((f) => `/uploads/vehicles/${f.filename}`);
-    const vehicle = await this.inventoryService.addImages(id, paths);
+    // Upload each buffer via StorageService → public S3 URL (or local path in
+    // dev). The returned URLs are stored verbatim in vehicle.photos[]; the
+    // frontend's fileUrl() passes absolute URLs through unchanged.
+    const urls = await Promise.all(
+      files.map((f) => this.storage.upload(f.buffer, f.originalname, f.mimetype, 'vehicles')),
+    );
+    const vehicle = await this.inventoryService.addImages(id, urls);
     return { message: `${files.length} image(s) uploaded`, data: vehicle };
   }
 
@@ -187,7 +192,7 @@ export class InventoryController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Delete a vehicle image',
-    description: 'Removes a photo path from the vehicle\'s photos[] array. The file on disk is left untouched (cleanup is a separate concern).',
+    description: 'Removes a photo from the vehicle\'s photos[] array and best-effort deletes the underlying object (S3 object or local file).',
   })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiBody({ description: 'Photo path to remove', schema: { type: 'object', properties: { photoPath: { type: 'string', example: '/uploads/vehicles/abc.jpg' } } } })

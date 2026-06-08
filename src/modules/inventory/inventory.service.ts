@@ -13,6 +13,7 @@ import { SellerLead, SellerLeadDocument } from '../crm-sellers/schemas/seller-le
 import { AccountingService } from '../accounting/accounting.service';
 import { ActivityService } from '../activity/activity.service';
 import { VinDecodeService, DecodedVehicleFields } from './vin-decode.service';
+import { StorageService } from '../../common/storage/storage.service';
 
 @Injectable()
 export class InventoryService {
@@ -26,6 +27,7 @@ export class InventoryService {
     @Inject(forwardRef(() => AccountingService)) private accountingService: AccountingService,
     private readonly activity: ActivityService,
     private readonly vinDecode: VinDecodeService,
+    private readonly storage: StorageService,
   ) {}
 
   /**
@@ -279,6 +281,9 @@ export class InventoryService {
       { new: true },
     );
     if (!vehicle) throw new NotFoundException('Vehicle not found');
+    // Best-effort: delete the underlying object (S3 or local). Never throws —
+    // the DB is the source of truth; an orphaned blob is harmless.
+    await this.storage.remove(photoPath);
     return vehicle;
   }
 
