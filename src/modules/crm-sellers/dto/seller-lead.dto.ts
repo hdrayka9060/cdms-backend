@@ -1,35 +1,26 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsNotEmpty, IsString, IsEmail, IsNumber, IsEnum, IsOptional, IsDateString, Min, IsArray,
-  ValidateNested, IsInt, Max,
+  ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { SellerLeadStage } from '../schemas/seller-lead.schema';
-import { FuelType, Transmission, VehicleStatus, HostingType } from '../../inventory/schemas/vehicle.schema';
+import { CreateVehicleDto } from '../../inventory/dto/vehicle.dto';
 
 /**
  * One vehicle the seller is offering. Maps to a row in the `vehicles` (inventory)
- * collection on save. Mirrors a subset of CreateVehicleDto — kept independent so
- * we can evolve the seller intake form without coupling to inventory field churn.
+ * collection on save. Extends the canonical CreateVehicleDto so the seller intake
+ * form accepts EXACTLY the same fields as the Inventory "Add Vehicle" form —
+ * including trim / engine / drivetrain / engineSize / interiorColor / doors.
+ *
+ * Why extend instead of re-declaring a subset: the global ValidationPipe runs
+ * with `forbidNonWhitelisted: true`, so any field the shared VehicleFormDialog
+ * emits that isn't whitelisted here 400s the whole request. Inheriting the full
+ * DTO keeps the two forms permanently in lockstep. The `seller` field carried on
+ * CreateVehicleDto is ignored here — InventoryService.create overrides it with
+ * the seller id from the route/parent.
  */
-export class SellerVehicleInputDto {
-  @ApiProperty({ example: '2022 Toyota Camry XSE' }) @IsNotEmpty() @IsString() title: string;
-  @ApiProperty({ example: 'Toyota' }) @IsNotEmpty() @IsString() company: string;
-  @ApiProperty({ example: 'Camry' }) @IsNotEmpty() @IsString() model: string;
-  @ApiProperty({ example: 2022, minimum: 1900, maximum: 2100 }) @IsInt() @Min(1900) @Max(2100) year: number;
-  @ApiProperty({ example: 35000 }) @IsNumber() @Min(0) price: number;
-  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) km?: number;
-  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) discount?: number;
-  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(1) owners?: number;
-  @ApiPropertyOptional({ enum: FuelType }) @IsOptional() @IsEnum(FuelType) fuelType?: FuelType;
-  @ApiPropertyOptional({ enum: Transmission }) @IsOptional() @IsEnum(Transmission) transmission?: Transmission;
-  @ApiPropertyOptional() @IsOptional() @IsString() color?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() vin?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() bodyType?: string;
-  @ApiPropertyOptional() @IsOptional() @IsString() description?: string;
-  @ApiPropertyOptional({ enum: VehicleStatus }) @IsOptional() @IsEnum(VehicleStatus) status?: VehicleStatus;
-  @ApiPropertyOptional({ enum: HostingType }) @IsOptional() @IsEnum(HostingType) hosting?: HostingType;
-}
+export class SellerVehicleInputDto extends CreateVehicleDto {}
 
 export class CreateSellerLeadDto {
   @ApiProperty() @IsNotEmpty() @IsString() sellerName: string;
@@ -74,6 +65,15 @@ export class CommunicateDto {
 
   @ApiProperty({ description: 'Message content or call notes' })
   @IsNotEmpty() @IsString() message: string;
+}
+
+/** Edit an existing logged communication. Both fields optional — send what changed. */
+export class UpdateCommunicateDto {
+  @ApiPropertyOptional({ enum: ['email', 'sms', 'whatsapp', 'call'] })
+  @IsOptional() @IsEnum(['email', 'sms', 'whatsapp', 'call']) channel?: string;
+
+  @ApiPropertyOptional({ description: 'Updated message content or call notes' })
+  @IsOptional() @IsNotEmpty() @IsString() message?: string;
 }
 
 export class ScheduleInspectionDto {

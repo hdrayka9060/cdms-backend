@@ -5,13 +5,16 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 export type VehicleDocument = Vehicle & Document;
 
 export enum VehicleStatus {
+  /** Freshly added stock. Auto-expires to NONE after 2 days (see cron). */
   NEW = 'new',
-  INSPECTION = 'inspection',
-  UNSOLD = 'unsold',
-  TEST_DRIVE = 'test_drive',
-  RESERVED = 'reserved',
-  PENDING = 'pending',
+  /** Sold. Stamps soldAt/soldDate; shown with a SOLD badge/ribbon. */
   SOLD = 'sold',
+  /**
+   * No status — the car is simply available for sale (no badge). Cars leave
+   * NEW for this after 2 days, and un-selling a car returns it here. Stored as
+   * an empty string so "available" is the natural default state.
+   */
+  NONE = '',
 }
 
 export enum HostingType {
@@ -74,16 +77,31 @@ export class Vehicle {
   @ApiPropertyOptional() @Prop({ default: '' }) trim: string;
   /** Engine summary (e.g. "2.0L · 4-cyl · 200hp"). Free-text; VIN decoder fills it. */
   @ApiPropertyOptional() @Prop({ default: '' }) engine: string;
+  /** Drive configuration (e.g. "FWD", "AWD", "4X4", "RWD"). */
+  @ApiPropertyOptional() @Prop({ default: '' }) drivetrain: string;
+  /** Engine displacement (e.g. "3.6 L"); `engine` holds the fuller summary. */
+  @ApiPropertyOptional() @Prop({ default: '' }) engineSize: string;
+  /** Interior colour (exterior colour is `color`). */
+  @ApiPropertyOptional() @Prop({ default: '' }) interiorColor: string;
+  /** Number of doors. */
+  @ApiPropertyOptional() @Prop({ default: 0, min: 0 }) doors: number;
   /**
-   * Lifecycle status. Defaults to NEW for freshly added vehicles — the
-   * `InventoryService.expireNewVehicles` cron flips any vehicle still in NEW
-   * after 2 days of createdAt over to PENDING. Manually changing status off
-   * NEW (any path: PATCH, lead-close cascade, etc.) takes the vehicle out of
-   * the cron's scope; the timer is effectively "since createdAt, while still
-   * NEW".
+   * Lifecycle status — only NEW, SOLD, or NONE(''). Defaults to NEW for freshly
+   * added vehicles; the `InventoryService.expireNewVehicles` cron flips any
+   * vehicle still in NEW after 2 days of createdAt over to NONE (no status /
+   * available). A recorded sale sets SOLD; un-selling returns it to NONE.
    */
   @ApiProperty({ enum: VehicleStatus }) @Prop({ type: String, enum: VehicleStatus, default: VehicleStatus.NEW }) status: VehicleStatus;
   @ApiProperty({ enum: HostingType }) @Prop({ type: String, enum: HostingType, default: HostingType.PLATFORM }) hosting: HostingType;
+  /**
+   * Deliberate "show on the public dealer website" flag — independent of sale
+   * status. The public `/website/inventory` endpoint returns only vehicles with
+   * this true AND status ∈ {unsold, sold}; a published sold car renders with a
+   * "Sold" badge, a published unsold car is available, and anything unpublished
+   * never appears. Defaults to true so newly-added stock is listed once it goes
+   * unsold; the dealer toggles it on the Dealer Website page.
+   */
+  @ApiProperty() @Prop({ default: true }) publishedToWebsite: boolean;
   @ApiProperty() @Prop({ type: [String], default: [] }) features: string[];
   @ApiProperty() @Prop({ type: [{ field: String, value: String, changedAt: Date, changedBy: String }], default: [] }) history: any[];
   /**

@@ -25,6 +25,25 @@ export class CreateLeadDto {
   @IsOptional() @IsMongoId() assignedTo?: string;
 
   @ApiPropertyOptional() @IsOptional() @IsString() notes?: string;
+
+  // ── Sale details (required only when creating a lead directly as CLOSED) ──
+  // A lead can only be "closed" if the car is actually sold, so these capture
+  // the sale the same way the /close endpoint does. Ignored for any other
+  // initial status.
+  @ApiPropertyOptional({ description: 'Realised sale price. Required when status=closed.' })
+  @IsOptional() @IsNumber() @Min(0) soldAt?: number;
+
+  @ApiPropertyOptional({ description: 'Amount paid. Required when paymentStatus=partial.' })
+  @IsOptional() @IsNumber() @Min(0) amountPaid?: number;
+
+  @ApiPropertyOptional({ enum: PAYMENT_METHODS })
+  @IsOptional() @IsEnum(PAYMENT_METHODS) paymentMethod?: (typeof PAYMENT_METHODS)[number];
+
+  @ApiPropertyOptional({ enum: PAYMENT_STATUSES })
+  @IsOptional() @IsEnum(PAYMENT_STATUSES) paymentStatus?: (typeof PAYMENT_STATUSES)[number];
+
+  @ApiPropertyOptional({ description: 'ISO sale date; defaults to today.' })
+  @IsOptional() @IsDateString() saleDate?: string;
 }
 
 export class UpdateLeadDto {

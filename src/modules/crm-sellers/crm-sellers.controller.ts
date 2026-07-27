@@ -5,8 +5,8 @@ import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse, ApiParam, ApiQuery, 
 import { IsEnum, IsOptional } from 'class-validator';
 import { CrmSellersService } from './crm-sellers.service';
 import {
-  CreateSellerLeadDto, UpdateSellerLeadDto, CommunicateDto, ScheduleInspectionDto,
-  SellerVehicleInputDto,
+  CreateSellerLeadDto, UpdateSellerLeadDto, CommunicateDto, UpdateCommunicateDto,
+  ScheduleInspectionDto, SellerVehicleInputDto,
 } from './dto/seller-lead.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
@@ -140,6 +140,36 @@ Message is stored in the communications log with timestamp and sender.`,
   async communicate(@Param('id') id: string, @Body() dto: CommunicateDto, @CurrentUser() user: any) {
     const lead = await this.service.communicate(id, dto, user._id);
     return { message: 'Communication logged', data: lead };
+  }
+
+  @Patch(':id/communicate/:commId')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.EDIT)
+  @ApiOperation({ summary: 'Edit a logged communication', description: 'Updates the message and/or channel of an existing communication entry.' })
+  @ApiParam({ name: 'id', description: 'Seller lead ObjectId' })
+  @ApiParam({ name: 'commId', description: 'Communication subdocument ObjectId' })
+  async updateCommunication(
+    @Param('id') id: string,
+    @Param('commId') commId: string,
+    @Body() dto: UpdateCommunicateDto,
+    @CurrentUser() user: any,
+  ) {
+    const lead = await this.service.updateCommunication(id, commId, dto, user?._id);
+    return { message: 'Communication updated', data: lead };
+  }
+
+  @Delete(':id/communicate/:commId')
+  @RequirePermission(AppModule.CRM_SELLERS, PermissionAction.DELETE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete a logged communication', description: 'Removes a single communication entry from the seller.' })
+  @ApiParam({ name: 'id', description: 'Seller lead ObjectId' })
+  @ApiParam({ name: 'commId', description: 'Communication subdocument ObjectId' })
+  async deleteCommunication(
+    @Param('id') id: string,
+    @Param('commId') commId: string,
+    @CurrentUser() user: any,
+  ) {
+    const lead = await this.service.deleteCommunication(id, commId, user?._id);
+    return { message: 'Communication deleted', data: lead };
   }
 
   @Delete(':id')

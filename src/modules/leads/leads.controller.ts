@@ -51,7 +51,7 @@ export class LeadsController {
   @ApiResponse({ status: 201, description: 'Lead created' })
   async create(@Body() dto: CreateLeadDto, @CurrentUser() user: any) {
     const actorName = formatActor(user);
-    const lead = await this.service.create(dto, actorName);
+    const lead = await this.service.create(dto, actorName, user?._id ? String(user._id) : undefined);
     return { message: 'Lead created', data: lead };
   }
 

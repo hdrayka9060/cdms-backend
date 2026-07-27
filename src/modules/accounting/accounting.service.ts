@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { Sale, SaleDocument, Expense, ExpenseDocument } from './schemas/accounting.schema';
@@ -8,9 +8,108 @@ import { Lead, LeadDocument, LeadStatus } from '../leads/schemas/lead.schema';
 import { ActivityService } from '../activity/activity.service';
 import { PaginatedResult } from '../../common/dto/pagination.dto';
 
+/** Category tag for vehicle reconditioning spends mirrored into the expense ledger. */
+export const RECONDITIONING_CATEGORY = 'reconditioning';
+
 @Injectable()
-export class AccountingService {
+export class AccountingService implements OnModuleInit {
   private readonly logger = new Logger(AccountingService.name);
+
+  /**
+   * Backfill: mirror every existing vehicle reconditioning spend into the
+   * expense ledger as a category='reconditioning' row. Idempotent — keyed on
+   * `spendId`, so it only creates rows that don't yet exist. Runs on boot so
+   * pre-existing spends (recorded before spends became expense records) show up
+   * in the ledger and count toward reconditioning exactly once.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      // lean() shows the RAW stored spends — Mongoose would otherwise inject
+      // ephemeral (unpersisted) `_id`s on hydration, which must not be used as
+      // the sync key. Legacy/seeded spends lack `_id`; assign one and PERSIST it
+      // via a direct $set so the mirrored expense's spendId stays stable.
+      const vehicles = await this.vehicleModel
+        .find({ isDeleted: false, 'spends.0': { $exists: true } })
+        .lean();
+      let created = 0;
+      let idsAssigned = 0;
+      for (const v of vehicles as any[]) {
+        const spends = (v.spends ?? []) as any[];
+        let dirty = false;
+        for (const s of spends) {
+          if (!s._id) {
+            s._id = new Types.ObjectId();
+            dirty = true;
+            idsAssigned++;
+          }
+        }
+        if (dirty) {
+          await this.vehicleModel.updateOne({ _id: v._id }, { $set: { spends } });
+        }
+        for (const s of spends) {
+          const exists = await this.expenseModel.exists({ spendId: String(s._id) });
+          if (exists) continue;
+          await this.upsertSpendExpense({
+            vehicleId: String(v._id),
+            spendId: String(s._id),
+            vehicleTitle: v.title,
+            amount: Number(s.amount) || 0,
+            date: s.date ? new Date(s.date) : new Date(),
+            description: s.description ?? '',
+          });
+          created++;
+        }
+      }
+      if (created || idsAssigned) {
+        this.logger.log(
+          `reconditioning backfill: assigned ${idsAssigned} spend id(s), created ${created} expense(s)`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `reconditioning-expense backfill failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Create or update the expense-ledger row mirroring a vehicle reconditioning
+   * spend. Upsert keyed on `spendId` so edits sync and re-runs never duplicate.
+   */
+  async upsertSpendExpense(opts: {
+    vehicleId: string;
+    spendId: string;
+    vehicleTitle: string;
+    amount: number;
+    date: Date;
+    description?: string;
+  }): Promise<void> {
+    await this.expenseModel.updateOne(
+      { spendId: String(opts.spendId) },
+      {
+        $set: {
+          title: `Reconditioning · ${opts.vehicleTitle ?? 'Vehicle'}`,
+          amount: Math.max(0, Number(opts.amount) || 0),
+          date: opts.date,
+          category: RECONDITIONING_CATEGORY,
+          source: 'vehicle-spend',
+          vehicleId: String(opts.vehicleId),
+          spendId: String(opts.spendId),
+          notes: opts.description ?? '',
+          isDeleted: false,
+        },
+      },
+      { upsert: true },
+    );
+  }
+
+  /** Soft-delete the expense-ledger row mirroring a removed vehicle spend. */
+  async removeSpendExpense(spendId: string): Promise<void> {
+    await this.expenseModel.updateOne(
+      { spendId: String(spendId) },
+      { $set: { isDeleted: true } },
+    );
+  }
 
   constructor(
     @InjectModel(Sale.name) private saleModel: Model<SaleDocument>,
@@ -68,7 +167,16 @@ export class AccountingService {
       ]),
       this.expenseModel.aggregate([
         { $match: expensesMatch },
-        { $group: { _id: null, total: { $sum: '$amount' } } },
+        {
+          $group: {
+            _id: null,
+            // Operating expenses = everything EXCEPT reconditioning.
+            operational: { $sum: { $cond: [{ $eq: ['$category', 'reconditioning'] }, 0, '$amount'] } },
+            // Reconditioning = vehicle spends mirrored into the ledger. Recognised
+            // when the spend is recorded (independent of sold status).
+            reconditioning: { $sum: { $cond: [{ $eq: ['$category', 'reconditioning'] }, '$amount', 0] } },
+          },
+        },
       ]),
       this.saleModel.aggregate([
         { $match: { ...salesMatch, paymentStatus: { $in: ['pending', 'partial'] } } },
@@ -95,18 +203,27 @@ export class AccountingService {
 
     const revenue = salesAgg[0]?.totalRevenue || 0;
     const cost = salesAgg[0]?.totalCost || 0;
-    const spend = salesAgg[0]?.totalSpend || 0;
-    const expenses = expensesAgg[0]?.total || 0;
-    // Profit = realised sale price − cost basis (acquisition cost +
-    // reconditioning spend) = gross margin on vehicles sold. Reconditioning
-    // spend is cost-of-goods, NOT an operating expense — operating expenses
-    // stay surfaced separately and are never netted out of profit.
+    const operational = expensesAgg[0]?.operational || 0;
+    const reconditioning = expensesAgg[0]?.reconditioning || 0;
+    // Full-cost accounting: every dollar out is an expense.
+    //   Total Expenses = Operational + Reconditioning + Cost(of sold)
+    //   Profit         = Revenue − Total Expenses
+    // Reconditioning is now sourced from the expense ledger (category
+    // 'reconditioning'), recognised when the spend is recorded and independent
+    // of sold status — NOT from Sale.totalSpend — so each spend is counted once.
+    // Cost of vehicles is still recognised at sale (Sale.costPrice).
+    const totalExpenses = operational + reconditioning + cost;
     return {
       totalRevenue: revenue,
       totalCost: cost,
-      totalSpend: spend,
-      totalExpenses: expenses,
-      totalProfit: revenue - cost - spend,
+      totalSpend: reconditioning,
+      // Component breakdown so the UI can render Operational / Reconditioning /
+      // Cost-of-vehicles lines that sum to totalExpenses.
+      totalOperational: operational,
+      totalReconditioning: reconditioning,
+      totalCostOfVehicles: cost,
+      totalExpenses,
+      totalProfit: revenue - totalExpenses,
       totalSales: salesAgg[0]?.count || 0,
       outstanding: outstandingAgg[0]?.total || 0,
     };
@@ -403,6 +520,54 @@ export class AccountingService {
     }
 
     return sale;
+  }
+
+  /**
+   * Flatten every non-deleted vehicle's reconditioning spends into a single
+   * ledger-style list for the Accounting page.
+   *
+   * READ-ONLY and deliberately separate from the operating-expense ledger:
+   * vehicle spends are cost-of-goods (already folded into gross margin at sale
+   * time via Sale.totalSpend). They are surfaced here for visibility only — NOT
+   * written into the `expenses` collection — so they are never double-counted
+   * against profit. The date filter (when supplied) matches on the spend's own
+   * date, not the vehicle's createdAt.
+   */
+  async getReconditioningSpends(
+    startDate?: string,
+    endDate?: string,
+  ): Promise<{ items: any[]; totalAmount: number; count: number }> {
+    const dateMatch: any = {};
+    if (startDate) dateMatch.$gte = new Date(startDate);
+    if (endDate) dateMatch.$lte = new Date(endDate);
+
+    const pipeline: any[] = [
+      { $match: { isDeleted: false } },
+      { $unwind: '$spends' },
+    ];
+    if (Object.keys(dateMatch).length) {
+      pipeline.push({ $match: { 'spends.date': dateMatch } });
+    }
+    pipeline.push(
+      { $sort: { 'spends.date': -1 } },
+      {
+        $project: {
+          _id: '$spends._id',
+          vehicleId: '$_id',
+          vehicleTitle: '$title',
+          vehicleNumber: '$vehicleNumber',
+          amount: '$spends.amount',
+          category: '$spends.category',
+          description: '$spends.description',
+          date: '$spends.date',
+          by: '$spends.by',
+        },
+      },
+    );
+
+    const items = await this.vehicleModel.aggregate(pipeline);
+    const totalAmount = items.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+    return { items, totalAmount, count: items.length };
   }
 
   async getExpenses(query: any): Promise<PaginatedResult<ExpenseDocument>> {

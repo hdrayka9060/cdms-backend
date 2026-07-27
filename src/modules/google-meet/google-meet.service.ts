@@ -48,8 +48,15 @@ export class GoogleMeetService implements OnModuleInit {
   private calendar: calendar_v3.Calendar | null = null;
   private calendarId = 'primary';
   private devMode = true;
+  /** Set when the boot token check fails (e.g. `invalid_grant`); null when healthy. */
+  private connectionError: string | null = null;
 
   constructor(private readonly config: ConfigService) {}
+
+  /** The current auth problem (if any) — for admin health/status surfaces. */
+  getConnectionError(): string | null {
+    return this.connectionError;
+  }
 
   onModuleInit() {
     const clientId = this.config.get<string>('GOOGLE_CLIENT_ID');
@@ -81,15 +88,41 @@ export class GoogleMeetService implements OnModuleInit {
     oauth2.setCredentials({ refresh_token: refreshToken });
     this.calendar = googleCalendar({ version: 'v3', auth: oauth2 });
 
+    // If Google ever hands back a rotated refresh_token (happens on re-consent),
+    // surface it loudly so the operator can persist it — a silently-dropped new
+    // token is a future outage. The library auto-refreshes ACCESS tokens on
+    // every call already; only the long-lived refresh token needs our attention.
+    oauth2.on('tokens', (tokens) => {
+      if (tokens.refresh_token) {
+        this.logger.warn(
+          `🎥 Google returned a NEW refresh token — update GOOGLE_REFRESH_TOKEN in .env to:\n${tokens.refresh_token}`,
+        );
+      }
+    });
+
     // Confirm the refresh token actually works so a bad token surfaces at
     // boot rather than on the first virtual event. Non-blocking, like
     // MailService's transporter.verify().
     oauth2.getAccessToken().then(
-      () => this.logger.log(`🎥 Google Meet ready (calendarId=${this.calendarId})`),
-      (err) =>
-        this.logger.warn(
-          `🎥 Google Meet token check failed — Meet links may not generate: ${err?.message ?? err}`,
-        ),
+      () => {
+        this.connectionError = null;
+        this.logger.log(`🎥 Google Meet ready (calendarId=${this.calendarId})`);
+      },
+      (err) => {
+        const detail = err?.response?.data?.error ?? err?.message ?? String(err);
+        // `invalid_grant` = the refresh token is expired/revoked. This is the
+        // #1 cause of "Meet not creating". It cannot be fixed in code — an
+        // admin must re-mint the token AND publish the OAuth consent screen so
+        // it stops expiring (Testing-mode tokens die after 7 days).
+        if (String(detail).includes('invalid_grant')) {
+          this.connectionError =
+            'Google authorization expired. Re-mint the token (node scripts/get-google-refresh-token.mjs) and publish the OAuth consent screen to Production so it stops expiring.';
+          this.logger.error(`🎥 Google Meet DISCONNECTED (invalid_grant). ${this.connectionError}`);
+        } else {
+          this.connectionError = `Google Meet token check failed: ${detail}`;
+          this.logger.warn(`🎥 Google Meet token check failed — Meet links may not generate: ${detail}`);
+        }
+      },
     );
   }
 

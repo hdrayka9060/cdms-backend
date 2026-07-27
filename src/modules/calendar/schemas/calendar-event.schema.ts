@@ -111,6 +111,12 @@ export class CalendarEvent {
   // Linked vehicle for test drives & inspections.
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Vehicle' }) vehicle: Types.ObjectId;
 
+  // Optional link to a CRM Lead. When set, CalendarService pushes a note onto
+  // the lead's timeline (create/update/delete) and the public Buyer Portal
+  // lists this event under the buyer's appointments. Schema.Types.ObjectId —
+  // never Types.ObjectId (silent Mixed degradation, PROJECT_MEMORY.md §3).
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Lead' }) lead: Types.ObjectId;
+
   // ── Meeting location ───────────────────────────────────────────────────
   // `meetingType` separates physical from virtual. For virtual events the
   // service generates a Meet link when `createMeetLink: true` is passed at
@@ -158,3 +164,5 @@ CalendarEventSchema.index({ startDateTime: 1, endDateTime: 1, eventType: 1 });
 // Index both so the OR query can use them.
 CalendarEventSchema.index({ assignedTo: 1, startDateTime: 1 });
 CalendarEventSchema.index({ 'participants.userId': 1, startDateTime: 1 });
+// Buyer-portal + Leads-tab linkage: list/lookup events by their linked lead.
+CalendarEventSchema.index({ lead: 1, startDateTime: 1 });

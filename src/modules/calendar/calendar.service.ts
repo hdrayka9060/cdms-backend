@@ -1,8 +1,10 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model, Types } from 'mongoose';
@@ -23,6 +25,20 @@ import { ActivityService } from '../activity/activity.service';
 import { GoogleMeetService } from '../google-meet/google-meet.service';
 import { MailService } from '../mail/mail.service';
 import { User, UserDocument } from '../users/schemas/user.schema';
+import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
+import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
+import { SellerLead, SellerLeadDocument } from '../crm-sellers/schemas/seller-lead.schema';
+
+/** Identity of the caller, threaded from the controller for authorization. */
+export interface CalendarActor {
+  id?: string;
+  /** True when the caller's role grants full access (edit/delete any event). */
+  isAdmin?: boolean;
+}
+
+/** Message shown when a requested Google Meet link could not be provisioned. */
+const MEET_UNAVAILABLE_MSG =
+  'Could not create a Google Meet link. Ensure Google Calendar is configured on the server, or uncheck "Create Google Meet link" and paste an existing link instead.';
 
 /**
  * Calendar service.
@@ -51,10 +67,42 @@ export class CalendarService {
   constructor(
     @InjectModel(CalendarEvent.name) private model: Model<CalendarEventDocument>,
     @InjectModel(User.name) private userModel: Model<UserDocument>,
+    @InjectModel(Lead.name) private leadModel: Model<LeadDocument>,
+    @InjectModel(BuyerLead.name) private buyerModel: Model<BuyerLeadDocument>,
+    @InjectModel(SellerLead.name) private sellerModel: Model<SellerLeadDocument>,
     private readonly activity: ActivityService,
     private readonly googleMeet: GoogleMeetService,
     private readonly mail: MailService,
   ) {}
+
+  /**
+   * Whether `actor` may edit/delete `event`: the creator, the assigned staff
+   * member, or a full-access (admin) user. Everyone else is blocked even if
+   * their role grants Calendar:edit/delete (a participant with an edit-capable
+   * role must NOT be able to mutate an event they neither created nor own).
+   */
+  private canManageEvent(
+    event: Pick<CalendarEvent, 'createdBy' | 'assignedTo'>,
+    actor?: CalendarActor,
+  ): boolean {
+    if (actor?.isAdmin) return true;
+    if (!actor?.id) return false;
+    const creator = event.createdBy ? String(event.createdBy) : '';
+    const assignee = event.assignedTo ? String(event.assignedTo) : '';
+    return actor.id === creator || actor.id === assignee;
+  }
+
+  /** Human-readable "when" line for invitation / update emails. */
+  private whenText(d: Date | string): string {
+    return new Date(d).toLocaleString('en-US', {
+      weekday: 'short',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
 
   // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -88,44 +136,66 @@ export class CalendarService {
   }
 
   /**
-   * Email the Meet link to everyone on the event (assignee + participants +
-   * customer). This replaces Google Calendar invites — the dealer wants the
-   * link delivered without creating calendar invites. Best-effort: a mail
-   * failure must never break event creation.
+   * Email an INVITATION to an explicit recipient list — used both on create
+   * (everyone) and on update (only the newly-added participants / new assignee).
+   * Physical events carry the location; virtual events carry the link (or
+   * "link to follow"). Best-effort: a mail failure must never break the event.
    */
-  private async emailMeetingLink(
-    meetLink: string,
+  private async emailEventInvitation(
+    recipients: string[],
     ctx: {
       title: string;
-      startISO: string;
-      assignedTo?: string;
-      customerEmail?: string;
-      participants?: { email?: string }[];
+      start: Date | string;
+      meetingType: MeetingType;
+      location?: string;
+      meetLink?: string;
     },
   ): Promise<void> {
-    if (!meetLink) return;
+    if (!recipients.length) return;
     try {
-      const recipients = await this.assembleAttendees({
-        assignedTo: ctx.assignedTo,
-        customerEmail: ctx.customerEmail,
-        participants: ctx.participants,
-      });
-      if (recipients.length === 0) return;
-      await this.mail.sendMeetingLink({
+      await this.mail.sendEventInvitation({
         to: recipients,
         eventTitle: ctx.title,
-        whenText: new Date(ctx.startISO).toLocaleString('en-US', {
-          weekday: 'short',
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
-        meetLink,
+        whenText: this.whenText(ctx.start),
+        meetingType: ctx.meetingType === MeetingType.VIRTUAL ? 'virtual' : 'physical',
+        location: ctx.location,
+        meetLink: ctx.meetLink,
       });
     } catch (err) {
-      this.logger.warn(`failed to email meeting link: ${err}`);
+      this.logger.warn(`failed to email event invitation: ${err}`);
+    }
+  }
+
+  /**
+   * Email a single UPDATE notification to an explicit recipient list when an
+   * event's timing changed and/or it was converted between physical and
+   * virtual. The caller collapses every change into one `changesText` so
+   * attendees get exactly one email per edit. Best-effort — never breaks it.
+   */
+  private async emailEventUpdate(
+    recipients: string[],
+    ctx: {
+      title: string;
+      start: Date | string;
+      changesText: string;
+      meetingType: MeetingType;
+      location?: string;
+      meetLink?: string;
+    },
+  ): Promise<void> {
+    if (!recipients.length) return;
+    try {
+      await this.mail.sendEventUpdate({
+        to: recipients,
+        eventTitle: ctx.title,
+        whenText: this.whenText(ctx.start),
+        changesText: ctx.changesText,
+        meetingType: ctx.meetingType === MeetingType.VIRTUAL ? 'virtual' : 'physical',
+        location: ctx.location,
+        meetLink: ctx.meetLink,
+      });
+    } catch (err) {
+      this.logger.warn(`failed to email event update: ${err}`);
     }
   }
 
@@ -144,40 +214,64 @@ export class CalendarService {
     };
   }
 
+  /**
+   * Best-effort note onto a linked lead's timeline so the Leads tab captures
+   * every event tied to the lead (and the Buyer Portal can surface them). Never
+   * throws — a timeline failure must not break event create/update/delete.
+   */
+  private async pushLeadTimeline(
+    leadId: string | undefined,
+    action: string,
+    by?: string,
+  ): Promise<void> {
+    if (!leadId || !Types.ObjectId.isValid(leadId)) return;
+    try {
+      await this.leadModel.updateOne(
+        { _id: new Types.ObjectId(leadId), isDeleted: false },
+        { $push: { timeline: { date: new Date(), action, by: by ?? '' } } },
+      );
+    } catch (err) {
+      this.logger.warn(`failed to push lead timeline leadId=${leadId}: ${err}`);
+    }
+  }
+
+  /** Human-readable "when" for a timeline note. */
+  private whenLabel(d: Date | string): string {
+    return new Date(d).toLocaleString();
+  }
+
   // ── CRUD ────────────────────────────────────────────────────────────────
 
   async create(
     dto: CreateCalendarEventDto,
     actorId?: string,
   ): Promise<CalendarEventDocument> {
+    // Every event MUST have an assigned staff member. When the client doesn't
+    // pick one, default to the creator (self) — the product requirement.
+    const assignedToId = dto.assignedTo || actorId;
+
     // Provision a REAL Google Meet link for virtual events when requested.
     // GoogleMeetService inserts a Google Calendar event with conferenceData
     // and returns the genuine meet.google.com room + the Google event id.
-    // In dev mode (no Google creds) it returns null and we fall back to any
-    // pasted link — never a fabricated one. Physical events keep `location`.
+    // If a link was REQUESTED but couldn't be created (Google not configured
+    // or the API failed) we now BLOCK the create with an error instead of
+    // silently saving a linkless event — the dealer asked to be told.
     const shouldGenerateMeet =
       dto.meetingType === MeetingType.VIRTUAL && dto.createMeetLink === true;
     let meetLink = dto.meetLink ?? '';
     let googleEventId = '';
     if (shouldGenerateMeet) {
-      const startISO = new Date(dto.startDateTime).toISOString();
       const meet = await this.googleMeet.createMeetEvent({
         title: dto.title,
         description: dto.description,
-        startISO,
+        startISO: new Date(dto.startDateTime).toISOString(),
         endISO: new Date(dto.endDateTime).toISOString(),
       });
-      if (meet) {
+      if (meet && meet.meetLink) {
         meetLink = meet.meetLink;
         googleEventId = meet.googleEventId;
-        // Email the link to everyone — NO Google Calendar invite is sent.
-        await this.emailMeetingLink(meetLink, {
-          title: dto.title,
-          startISO,
-          assignedTo: dto.assignedTo,
-          customerEmail: dto.customerEmail,
-          participants: dto.participants,
-        });
+      } else {
+        throw new ServiceUnavailableException(MEET_UNAVAILABLE_MSG);
       }
     }
 
@@ -193,7 +287,7 @@ export class CalendarService {
       meetingType: dto.meetingType ?? MeetingType.PHYSICAL,
       meetLink,
       googleEventId,
-      assignedTo: dto.assignedTo ? new Types.ObjectId(dto.assignedTo) : undefined,
+      assignedTo: assignedToId ? new Types.ObjectId(assignedToId) : undefined,
       // Capture who created this event. Set from the controller via the
       // authenticated user, NOT from the DTO — client-supplied creator
       // would be a forgeable identity claim.
@@ -202,6 +296,7 @@ export class CalendarService {
       customerPhone: dto.customerPhone ?? '',
       customerEmail: dto.customerEmail ?? '',
       vehicle: dto.vehicle ? new Types.ObjectId(dto.vehicle) : undefined,
+      lead: dto.lead ? new Types.ObjectId(dto.lead) : undefined,
       location: dto.location ?? '',
       notes: dto.notes ?? '',
       participants,
@@ -219,11 +314,36 @@ export class CalendarService {
           meetingType: saved.meetingType,
           startDateTime: saved.startDateTime,
           participantCount: saved.participants.length,
+          lead: saved.lead ? String(saved.lead) : undefined,
         },
       });
     } catch (err) {
       this.logger.warn(`activity log failed for calendar create id=${saved._id}: ${err}`);
     }
+
+    // Capture the event on the linked lead's timeline (best-effort).
+    if (saved.lead) {
+      await this.pushLeadTimeline(
+        String(saved.lead),
+        `${labelFor(saved.eventType)} scheduled · ${saved.title || 'event'} · ${this.whenLabel(saved.startDateTime)}`,
+        actorId,
+      );
+    }
+
+    // Invite everyone (assignee + participants + customer) — physical OR
+    // virtual. Best-effort; a mail failure never rolls back the saved event.
+    const inviteRecipients = await this.assembleAttendees({
+      assignedTo: assignedToId,
+      customerEmail: saved.customerEmail,
+      participants: dto.participants,
+    });
+    await this.emailEventInvitation(inviteRecipients, {
+      title: saved.title,
+      start: saved.startDateTime,
+      meetingType: saved.meetingType,
+      location: saved.location,
+      meetLink: saved.meetLink,
+    });
 
     return saved;
   }
@@ -303,18 +423,31 @@ export class CalendarService {
     return event;
   }
 
-  async update(id: string, dto: UpdateCalendarEventDto): Promise<CalendarEventDocument> {
+  async update(
+    id: string,
+    dto: UpdateCalendarEventDto,
+    actor?: CalendarActor,
+  ): Promise<CalendarEventDocument> {
+    const actorId = actor?.id;
     // Load the existing event first — the Google-Meet sync below needs the
     // current googleEventId / meetingType / attendees to decide whether to
     // create, patch, or cancel the backing Google Calendar event.
     const existing = await this.model.findOne({ _id: id, isDeleted: false });
     if (!existing) throw new NotFoundException('Event not found');
 
+    // Only the creator, the assigned staff member, or an admin may edit.
+    if (!this.canManageEvent(existing, actor)) {
+      throw new ForbiddenException(
+        'Only the event creator or assigned staff can edit this event',
+      );
+    }
+
     const $set: Record<string, unknown> = { ...dto };
     if (dto.startDateTime) $set.startDateTime = new Date(dto.startDateTime);
     if (dto.endDateTime) $set.endDateTime = new Date(dto.endDateTime);
     if (dto.assignedTo) $set.assignedTo = new Types.ObjectId(dto.assignedTo);
     if (dto.vehicle) $set.vehicle = new Types.ObjectId(dto.vehicle);
+    if (dto.lead) $set.lead = new Types.ObjectId(dto.lead);
 
     if (dto.participants) {
       $set.participants = dto.participants.map((p) => this.normaliseParticipant(p));
@@ -335,16 +468,6 @@ export class CalendarService {
         startISO: new Date(dto.startDateTime ?? existing.startDateTime).toISOString(),
         endISO: new Date(dto.endDateTime ?? existing.endDateTime).toISOString(),
       };
-      // Recipients for the link email (no Google calendar invite is sent).
-      const mailCtx = {
-        title: meetInput.title,
-        startISO: meetInput.startISO,
-        assignedTo:
-          dto.assignedTo ??
-          (existing.assignedTo ? String(existing.assignedTo) : undefined),
-        customerEmail: dto.customerEmail ?? existing.customerEmail,
-        participants: dto.participants ?? existing.participants,
-      };
 
       if (effectiveMeetingType === MeetingType.PHYSICAL && existing.googleEventId) {
         // No longer virtual → cancel the backing Google event + clear refs.
@@ -363,20 +486,28 @@ export class CalendarService {
         });
         if (res?.meetLink && wantsLink) {
           $set.meetLink = res.meetLink;
-          await this.emailMeetingLink(res.meetLink, mailCtx);
         }
       } else if (wantsLink) {
         // Virtual, no backing Google event yet → provision one now.
         const res = await this.googleMeet.createMeetEvent(meetInput);
-        if (res) {
+        if (res && res.meetLink) {
           $set.meetLink = res.meetLink;
           $set.googleEventId = res.googleEventId;
-          await this.emailMeetingLink(res.meetLink, mailCtx);
         }
       }
     }
     // Strip the trigger flag — it's not a persisted field.
     delete ($set as any).createMeetLink;
+
+    // A Meet link was REQUESTED but none resulted (Google disabled/failed and
+    // nothing pasted) → block the update with an error, mirroring create.
+    if (wantsLink) {
+      const resultingLink =
+        $set.meetLink !== undefined ? String($set.meetLink) : existing.meetLink;
+      if (!resultingLink) {
+        throw new ServiceUnavailableException(MEET_UNAVAILABLE_MSG);
+      }
+    }
 
     const event = await this.model.findOneAndUpdate(
       { _id: id, isDeleted: false },
@@ -398,10 +529,104 @@ export class CalendarService {
       this.logger.warn(`activity log failed for calendar update id=${id}: ${err}`);
     }
 
+    // ── Attendee emails ────────────────────────────────────────────────────
+    // Diff the attendee set before vs after the edit so we can:
+    //   • send a fresh INVITATION to anyone newly involved (a newly-added
+    //     participant, or a staff member the event was just re-assigned to);
+    //   • send a single UPDATE to the CONTINUING attendees when the timing
+    //     changed and/or the event was converted physical↔virtual (or the link
+    //     regenerated). Newly-invited people get only the invitation, never a
+    //     duplicate update. Best-effort throughout.
+    const beforeEmails = new Set(
+      await this.assembleAttendees({
+        assignedTo: existing.assignedTo ? String(existing.assignedTo) : undefined,
+        customerEmail: existing.customerEmail,
+        participants: existing.participants,
+      }),
+    );
+    const afterEmails = await this.assembleAttendees({
+      assignedTo: event.assignedTo ? String(event.assignedTo) : undefined,
+      customerEmail: event.customerEmail,
+      participants: event.participants,
+    });
+    const newlyInvited = afterEmails.filter((e) => !beforeEmails.has(e));
+    const continuing = afterEmails.filter((e) => beforeEmails.has(e));
+
+    // Newly-added participant(s) or a new assignee → fresh invitation.
+    await this.emailEventInvitation(newlyInvited, {
+      title: event.title,
+      start: event.startDateTime,
+      meetingType: event.meetingType,
+      location: event.location,
+      meetLink: event.meetLink,
+    });
+
+    // Timing / conversion / link change → single update to continuing attendees.
+    const timeChanged =
+      !!dto.startDateTime &&
+      new Date(dto.startDateTime).getTime() !== new Date(existing.startDateTime).getTime();
+    const meetingTypeChanged =
+      !!dto.meetingType && dto.meetingType !== existing.meetingType;
+    const linkChanged =
+      $set.meetLink !== undefined && String($set.meetLink) !== (existing.meetLink ?? '');
+    if (timeChanged || meetingTypeChanged || linkChanged) {
+      const changes: string[] = [];
+      if (meetingTypeChanged) {
+        changes.push(
+          `The meeting is now ${effectiveMeetingType === MeetingType.VIRTUAL ? 'virtual' : 'physical'}`,
+        );
+      }
+      if (timeChanged) changes.push('The time has changed');
+      if (linkChanged && !meetingTypeChanged && !timeChanged) {
+        changes.push('The meeting link has changed');
+      }
+      await this.emailEventUpdate(continuing, {
+        title: event.title,
+        start: event.startDateTime,
+        changesText: `${changes.join('. ')}.`,
+        meetingType: event.meetingType,
+        location: event.location,
+        meetLink: event.meetLink,
+      });
+    }
+
+    // Mirror meaningful changes onto the linked lead's timeline (best-effort).
+    // effectiveLead = the lead this event is tied to after the update (a
+    // newly-supplied one, else the one it already had).
+    const effectiveLead =
+      dto.lead ?? (existing.lead ? String(existing.lead) : undefined);
+    if (effectiveLead) {
+      const newlyLinked = !!dto.lead && String(existing.lead ?? '') !== String(dto.lead);
+      const timeChanged =
+        !!dto.startDateTime &&
+        new Date(dto.startDateTime).getTime() !== new Date(existing.startDateTime).getTime();
+      const statusChanged = !!dto.status && dto.status !== existing.status;
+      let note: string | undefined;
+      if (newlyLinked) {
+        note = `${labelFor(event.eventType)} linked · ${event.title || 'event'} · ${this.whenLabel(event.startDateTime)}`;
+      } else if (timeChanged) {
+        note = `${labelFor(event.eventType)} rescheduled to ${this.whenLabel(event.startDateTime)}`;
+      } else if (statusChanged) {
+        note = `${labelFor(event.eventType)} marked ${event.status}`;
+      }
+      if (note) await this.pushLeadTimeline(effectiveLead, note, actorId);
+    }
+
     return event;
   }
 
-  async remove(id: string): Promise<void> {
+  async remove(id: string, actor?: CalendarActor): Promise<void> {
+    const actorId = actor?.id;
+    // Authorize against the live event BEFORE soft-deleting: only the creator,
+    // the assigned staff member, or an admin may delete.
+    const target = await this.model.findOne({ _id: id, isDeleted: false });
+    if (!target) throw new NotFoundException('Event not found');
+    if (!this.canManageEvent(target, actor)) {
+      throw new ForbiddenException(
+        'Only the event creator or assigned staff can delete this event',
+      );
+    }
+
     const event = await this.model.findOneAndUpdate(
       { _id: id, isDeleted: false },
       { isDeleted: true },
@@ -413,6 +638,15 @@ export class CalendarService {
     // and any sent invites don't outlive the CDMS event.
     if (event.googleEventId) {
       await this.googleMeet.deleteMeetEvent(event.googleEventId);
+    }
+
+    // Note the cancellation on the linked lead's timeline (best-effort).
+    if (event.lead) {
+      await this.pushLeadTimeline(
+        String(event.lead),
+        `${labelFor(event.eventType)} cancelled · ${event.title || 'event'} · ${this.whenLabel(event.startDateTime)}`,
+        actorId,
+      );
     }
 
     try {
@@ -494,6 +728,92 @@ export class CalendarService {
       this.logger.warn(`activity log failed for participant-remove: ${err}`);
     }
     return event;
+  }
+
+  // ── Directory ───────────────────────────────────────────────────────────
+
+  /**
+   * Minimal attendee directory for the calendar UI — staff, buyers, sellers,
+   * and leads (id + name + email only). Gated by `Calendar:view` so a user
+   * with calendar access can populate the "view calendar of" combobox, the
+   * participant picker, and the link-to-lead dropdown WITHOUT needing Staff /
+   * CRM Buyers / CRM Sellers / Leads read permissions (which the CRM list
+   * endpoints require and which non-admin calendar roles lack — the root of
+   * the empty-picker bugs).
+   */
+  async getDirectory(): Promise<{
+    staff: { id: string; name: string; email: string }[];
+    buyers: { id: string; name: string; email: string; phone: string }[];
+    sellers: { id: string; name: string; email: string; phone: string }[];
+    leads: {
+      id: string;
+      buyerId: string;
+      buyerName: string;
+      buyerEmail: string;
+      buyerPhone: string;
+      vehicleId: string;
+      vehicleTitle: string;
+      status: string;
+    }[];
+  }> {
+    const [staffDocs, buyerDocs, sellerDocs, leadDocs] = await Promise.all([
+      this.userModel
+        .find({ isDeleted: false })
+        .select('firstName lastName email')
+        .sort({ firstName: 1 })
+        .lean(),
+      this.buyerModel
+        .find({ isDeleted: false })
+        .select('buyerName buyerEmail buyerPhone')
+        .sort({ buyerName: 1 })
+        .lean(),
+      this.sellerModel
+        .find({ isDeleted: false })
+        .select('sellerName sellerEmail sellerPhone')
+        .sort({ sellerName: 1 })
+        .lean(),
+      this.leadModel
+        .find({ isDeleted: false })
+        .populate('buyer', 'buyerName buyerEmail buyerPhone')
+        .populate('vehicle', 'title')
+        .sort({ createdAt: -1 })
+        .limit(300)
+        .lean(),
+    ]);
+
+    return {
+      staff: (staffDocs as any[]).map((s) => ({
+        id: String(s._id),
+        name: `${s.firstName ?? ''} ${s.lastName ?? ''}`.trim() || (s.email ?? ''),
+        email: s.email ?? '',
+      })),
+      buyers: (buyerDocs as any[]).map((b) => ({
+        id: String(b._id),
+        name: b.buyerName ?? '',
+        email: b.buyerEmail ?? '',
+        phone: b.buyerPhone ?? '',
+      })),
+      sellers: (sellerDocs as any[]).map((s) => ({
+        id: String(s._id),
+        name: s.sellerName ?? '',
+        email: s.sellerEmail ?? '',
+        phone: s.sellerPhone ?? '',
+      })),
+      leads: (leadDocs as any[]).map((l) => {
+        const buyer = l.buyer && typeof l.buyer === 'object' ? l.buyer : null;
+        const vehicle = l.vehicle && typeof l.vehicle === 'object' ? l.vehicle : null;
+        return {
+          id: String(l._id),
+          buyerId: buyer ? String(buyer._id) : l.buyer ? String(l.buyer) : '',
+          buyerName: buyer?.buyerName ?? '—',
+          buyerEmail: buyer?.buyerEmail ?? '',
+          buyerPhone: buyer?.buyerPhone ?? '',
+          vehicleId: vehicle ? String(vehicle._id) : l.vehicle ? String(l.vehicle) : '',
+          vehicleTitle: vehicle?.title ?? '—',
+          status: l.status ?? '',
+        };
+      }),
+    };
   }
 }
 

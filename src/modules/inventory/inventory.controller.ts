@@ -208,13 +208,13 @@ export class InventoryController {
   @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
   @ApiOperation({
     summary: 'Add a reconditioning spend to a vehicle',
-    description: `Records money spent on the car before it sells (repairs, service, parts, transport, detailing, etc.).
+    description: `Records money spent on the car (repairs, service, parts, transport, detailing, etc.).
 
-These are cost-of-goods, not operating expenses: the total is folded into the vehicle's cost basis at sale time (profit = sale price − cost − spends). **Blocked once the vehicle is sold** (the cost basis is locked into the Sale).`,
+Each spend is mirrored into the expense ledger as a category='reconditioning' row (counted toward Total Expenses exactly once, independent of sold status). Allowed even after the vehicle is sold — the Sale's spend snapshot re-syncs so the per-row margin stays accurate.`,
   })
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   @ApiResponse({ status: 201, description: 'Spend added' })
-  @ApiResponse({ status: 400, description: 'Vehicle is already sold, or invalid amount' })
+  @ApiResponse({ status: 400, description: 'Invalid amount' })
   async addSpend(@Param('id') id: string, @Body() dto: CreateVehicleSpendDto, @CurrentUser() user: any) {
     const vehicle = await this.inventoryService.addSpend(id, dto, user);
     return { message: 'Spend added', data: vehicle };
@@ -258,6 +258,27 @@ These are cost-of-goods, not operating expenses: the total is folded into the ve
   async removeSpend(@Param('id') id: string, @Param('spendId') spendId: string, @CurrentUser() user: any) {
     const vehicle = await this.inventoryService.removeSpend(id, spendId, user);
     return { message: 'Spend removed', data: vehicle };
+  }
+
+  /**
+   * GET /api/v1/inventory/:id/activity
+   */
+  @Get(':id/activity')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.VIEW)
+  @ApiOperation({
+    summary: 'Per-vehicle activity (views / inquiries / test drives + merged comms)',
+    description: `Lifetime activity for the vehicle's Activity tab:
+- \`views\`: storefront opens (traffic counter)
+- \`inquiries\`: website-sourced leads for this vehicle
+- \`testDrives\`: test-drive calendar events booked for this vehicle
+- \`logs\`: merged, newest-first communication log from the communication_logs collection + lead / buyer / seller comms that reference this vehicle (each tagged with a \`source\`).`,
+  })
+  @ApiParam({ name: 'id', description: 'Vehicle MongoDB ObjectId' })
+  @ApiResponse({ status: 200, description: 'Vehicle activity returned' })
+  @ApiResponse({ status: 404, description: 'Vehicle not found' })
+  async getVehicleActivity(@Param('id') id: string) {
+    const data = await this.inventoryService.getVehicleActivity(id);
+    return { message: 'Vehicle activity', data };
   }
 
   /**

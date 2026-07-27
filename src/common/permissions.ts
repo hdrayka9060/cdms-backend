@@ -44,6 +44,26 @@ const ALL_ACTIONS: PermissionAction[] = [
 ];
 
 /**
+ * True when a role grants EVERY action on EVERY module — i.e. the "super user".
+ * This is the system's own definition of an admin (the seeded Admin role is
+ * built exactly this way), and it's robust to the role being renamed or new
+ * modules being added (a role that doesn't cover a new module stops counting
+ * as admin until it's granted). Used for the calendar edit/delete override so
+ * a full-access user can manage any event, not just ones they own.
+ *
+ * Accepts a populated Role document (or anything with a `permissions` array).
+ */
+export function isAdminRole(role: unknown): boolean {
+  const perms = (role as { permissions?: RolePermission[] } | null | undefined)
+    ?.permissions;
+  if (!Array.isArray(perms)) return false;
+  return ALL_MODULES.every((module) => {
+    const entry = perms.find((p) => p.module === module);
+    return !!entry && ALL_ACTIONS.every((a) => entry.actions?.includes(a));
+  });
+}
+
+/**
  * Default seed roles. Mirrors src/data/staff.ts roles in the frontend prototype.
  *
  * Seeded on first boot if the roles collection is empty (or any of these names is missing).

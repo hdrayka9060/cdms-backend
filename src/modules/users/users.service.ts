@@ -96,7 +96,12 @@ export class UsersService {
   async findById(id: string): Promise<UserDocument> {
     const user = await this.userModel
       .findOne({ _id: id, isDeleted: false })
-      .populate('roleId');
+      // `match: { isDeleted: false }` is a security boundary: a soft-deleted
+      // role must NOT hydrate its permissions. When the role is deleted the
+      // populate yields `null`, and PermissionsGuard then denies every gated
+      // route ("User has no role assigned") instead of granting the deleted
+      // role's old permissions.
+      .populate({ path: 'roleId', match: { isDeleted: false } });
     if (!user) throw new NotFoundException('User not found');
     return user;
   }
@@ -104,7 +109,7 @@ export class UsersService {
   async findByEmail(email: string, includePassword = false): Promise<UserDocument | null> {
     const query = this.userModel
       .findOne({ email: email.toLowerCase(), isDeleted: false })
-      .populate('roleId');
+      .populate({ path: 'roleId', match: { isDeleted: false } });
     if (includePassword) query.select('+password +refreshToken');
     return query.exec();
   }

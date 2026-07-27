@@ -29,6 +29,8 @@ import { SettingsModule } from './modules/settings/settings.module';
 import { FacebookApiModule } from './modules/facebook-api/facebook-api.module';
 import { FacebookModule } from './modules/facebook/facebook.module';
 import { StorageModule } from './common/storage/storage.module';
+import { AdsApiModule } from './modules/ads-api/ads-api.module';
+import { AdsAnalyticsModule } from './modules/ads-analytics/ads-analytics.module';
 
 @Module({
   providers: [
@@ -112,6 +114,9 @@ import { StorageModule } from './common/storage/storage.module';
     // store media on Amazon S3 (public URLs Facebook can fetch), with a
     // local-disk fallback when S3_* is unset.
     StorageModule,
+    // AdsApiModule is @Global() — the ads-analytics feature service injects the
+    // read-only Google Ads + Meta Ads API wrappers without importing the module.
+    AdsApiModule,
     DashboardModule,
     InventoryModule,
     CrmSellersModule,
@@ -121,6 +126,7 @@ import { StorageModule } from './common/storage/storage.module';
     AccountingModule,
     BhphModule,
     MarketingModule,
+    AdsAnalyticsModule,
     DealerWebsiteModule,
     SupportModule,
     CommunicationModule,

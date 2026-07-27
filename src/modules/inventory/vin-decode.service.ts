@@ -29,6 +29,9 @@ export interface DecodedVin {
   fuel?: string; // raw NHTSA FuelTypePrimary, e.g. "Gasoline" (the form mapper coerces on save)
   transmission?: string; // composed raw, e.g. "Automatic 8-spd"
   bodyType?: string; // normalized to our canonical dropdown list ("SUV")
+  drivetrain?: string; // normalized from NHTSA DriveType ("AWD", "FWD", "4X4", "RWD")
+  engineSize?: string; // displacement, e.g. "2.5 L"
+  doors?: number; // number of doors
   plant?: string; // "Smyrna, Tennessee, United States (USA)"
   country?: string; // PlantCountry — country of origin
   title?: string; // "2016 Nissan Rogue"
@@ -42,6 +45,9 @@ export interface DecodedVehicleFields {
   trim?: string;
   engine?: string;
   bodyType?: string;
+  drivetrain?: string;
+  engineSize?: string;
+  doors?: number;
   fuelType?: FuelType;
   transmission?: Transmission;
   title?: string;
@@ -180,6 +186,9 @@ export class VinDecodeService {
       fuel: (r.FuelTypePrimary || '').trim() || undefined,
       transmission: this.composeTransmission(r) || undefined,
       bodyType: this.normalizeBodyType(r.BodyClass),
+      drivetrain: this.normalizeDrivetrain(r.DriveType),
+      engineSize: this.composeEngineSize(r),
+      doors: this.parseDoors(r.Doors),
       plant,
       country,
       title: [yearNum, company, model, (r.Trim || '').trim()].filter(Boolean).join(' ') || undefined,
@@ -198,6 +207,9 @@ export class VinDecodeService {
       trim: (r.Trim || r.Series || '').trim() || undefined,
       engine: this.composeEngine(r) || undefined,
       bodyType: this.normalizeBodyType(r.BodyClass),
+      drivetrain: this.normalizeDrivetrain(r.DriveType),
+      engineSize: this.composeEngineSize(r),
+      doors: this.parseDoors(r.Doors),
       fuelType: this.normalizeFuel(r.FuelTypePrimary),
       transmission: this.normalizeTransmission(r.TransmissionStyle),
       title: [yearNum, company, model, (r.Trim || '').trim()].filter(Boolean).join(' ') || undefined,
@@ -219,6 +231,35 @@ export class VinDecodeService {
       .filter(Boolean)
       .join(' ')
       .trim();
+  }
+
+  /** Engine displacement as a tidy "2.5 L" string (separate from the fuller `engine` summary). */
+  private composeEngineSize(r: any): string | undefined {
+    if (!r.DisplacementL) return undefined;
+    const n = parseFloat(r.DisplacementL);
+    return Number.isFinite(n) ? `${n.toFixed(1)} L` : undefined;
+  }
+
+  /** Doors as a positive integer, or undefined when NHTSA doesn't report it. */
+  private parseDoors(raw?: string): number | undefined {
+    if (raw === undefined || raw === null || String(raw).trim() === '') return undefined;
+    const n = parseInt(String(raw), 10);
+    return Number.isFinite(n) && n > 0 ? n : undefined;
+  }
+
+  /**
+   * Squash NHTSA's DriveType (e.g. "AWD/All-Wheel Drive", "4WD/4-Wheel Drive/4x4",
+   * "FWD/Front-Wheel Drive", "RWD/Rear-Wheel Drive") onto a short canonical token.
+   * Falls back to the trimmed raw value if it doesn't match a known pattern.
+   */
+  private normalizeDrivetrain(raw?: string): string | undefined {
+    if (!raw) return undefined;
+    const s = String(raw).toLowerCase();
+    if (s.includes('all-wheel') || s.includes('all wheel') || /\bawd\b/.test(s)) return 'AWD';
+    if (s.includes('4x4') || s.includes('4wd') || s.includes('4-wheel') || s.includes('four-wheel') || s.includes('four wheel')) return '4X4';
+    if (s.includes('front') || /\bfwd\b/.test(s)) return 'FWD';
+    if (s.includes('rear') || /\brwd\b/.test(s)) return 'RWD';
+    return String(raw).trim() || undefined;
   }
 
   private toTitle(s: string): string {

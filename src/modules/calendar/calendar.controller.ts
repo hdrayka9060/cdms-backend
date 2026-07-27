@@ -29,8 +29,13 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { AppModule, PermissionAction } from '../../common/permissions';
+import { AppModule, PermissionAction, isAdminRole } from '../../common/permissions';
 import { EventType, ParticipantType } from './schemas/calendar-event.schema';
+
+/** Build the CalendarActor (id + admin flag) from the authenticated user. */
+function actorFrom(user: any) {
+  return { id: user?._id?.toString(), isAdmin: isAdminRole(user?.roleId) };
+}
 
 @ApiTags('Calendar')
 @ApiBearerAuth('access-token')
@@ -86,6 +91,18 @@ buyers/sellers (purely an optimisation; results are correct either way).`,
     return { message: 'Upcoming events', data: events };
   }
 
+  @Get('directory')
+  @RequirePermission(AppModule.CALENDAR, PermissionAction.VIEW)
+  @ApiOperation({
+    summary: 'Attendee directory for the calendar UI',
+    description:
+      'Minimal staff / buyers / sellers / leads lists (id + name + email) for the "view calendar of" combobox, participant picker, and link-to-lead dropdown. Gated by Calendar:view so calendar users do not need CRM/Staff read permissions.',
+  })
+  async getDirectory() {
+    const directory = await this.service.getDirectory();
+    return { message: 'Directory retrieved', data: directory };
+  }
+
   @Get('events/:id')
   @RequirePermission(AppModule.CALENDAR, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get event by ID' })
@@ -99,8 +116,12 @@ buyers/sellers (purely an optimisation; results are correct either way).`,
   @RequirePermission(AppModule.CALENDAR, PermissionAction.EDIT)
   @ApiOperation({ summary: 'Update calendar event' })
   @ApiParam({ name: 'id' })
-  async update(@Param('id') id: string, @Body() dto: UpdateCalendarEventDto) {
-    const event = await this.service.update(id, dto);
+  async update(
+    @Param('id') id: string,
+    @Body() dto: UpdateCalendarEventDto,
+    @CurrentUser() actor: any,
+  ) {
+    const event = await this.service.update(id, dto, actorFrom(actor));
     return { message: 'Event updated', data: event };
   }
 
@@ -109,8 +130,8 @@ buyers/sellers (purely an optimisation; results are correct either way).`,
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete event (soft)' })
   @ApiParam({ name: 'id' })
-  async remove(@Param('id') id: string) {
-    await this.service.remove(id);
+  async remove(@Param('id') id: string, @CurrentUser() actor: any) {
+    await this.service.remove(id, actorFrom(actor));
     return { message: 'Event deleted', data: null };
   }
 

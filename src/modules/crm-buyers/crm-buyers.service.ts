@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
 import { BuyerLead, BuyerLeadDocument, BuyerLeadStage } from './schemas/buyer-lead.schema';
@@ -86,7 +86,25 @@ export class CrmBuyersService {
     return { ...lead, communications: comms };
   }
 
+  /**
+   * Reject a duplicate buyer email (case-insensitive, non-deleted). `excludeId`
+   * skips the buyer being edited so a no-op email save doesn't self-collide.
+   */
+  private async assertEmailUnique(email: string | undefined, excludeId?: string): Promise<void> {
+    const normalized = (email ?? '').trim();
+    if (!normalized) return;
+    const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const filter: any = {
+      isDeleted: false,
+      buyerEmail: { $regex: `^${escaped}$`, $options: 'i' },
+    };
+    if (excludeId) filter._id = { $ne: new Types.ObjectId(excludeId) };
+    const existing = await this.model.findOne(filter).select('_id').lean();
+    if (existing) throw new ConflictException(`A buyer with email ${normalized} already exists.`);
+  }
+
   async create(dto: CreateBuyerLeadDto): Promise<any> {
+    await this.assertEmailUnique(dto.buyerEmail);
     const ids = new Set<string>();
     for (const v of dto.interestedVehicles ?? []) {
       if (isValidObjectId(v)) ids.add(v);
@@ -147,6 +165,7 @@ export class CrmBuyersService {
 
   async update(id: string, dto: UpdateBuyerLeadDto): Promise<any> {
     if (!isValidObjectId(id)) throw new BadRequestException('Invalid buyer id');
+    if (dto.buyerEmail !== undefined) await this.assertEmailUnique(dto.buyerEmail, id);
     const lead = await this.model.findOneAndUpdate(
       { _id: id, isDeleted: false },
       { $set: dto },

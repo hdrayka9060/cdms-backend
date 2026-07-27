@@ -42,9 +42,18 @@ export class Expense {
   @Prop({ required: true }) title: string;
   @Prop({ required: true }) amount: number;
   @Prop({ required: true }) date: Date;
-  @Prop({ default: 'general', enum: ['general', 'marketing', 'maintenance', 'staff', 'utilities', 'other'] }) category: string;
+  @Prop({ default: 'general', enum: ['general', 'marketing', 'maintenance', 'staff', 'utilities', 'other', 'reconditioning'] }) category: string;
   @Prop({ default: '' }) vendor: string;
   @Prop({ default: '' }) notes: string;
+  /**
+   * Provenance for auto-created rows. 'vehicle-spend' marks an expense mirrored
+   * from a vehicle reconditioning spend (category='reconditioning'); such rows
+   * are managed via the vehicle's Spends tab, not the expense ledger, and are
+   * kept in sync (and backfilled) via `spendId`.
+   */
+  @Prop() source?: string;
+  @Prop() vehicleId?: string;
+  @Prop({ index: true }) spendId?: string;
   @Prop({ default: false }) isDeleted: boolean;
   createdAt: Date;
 }

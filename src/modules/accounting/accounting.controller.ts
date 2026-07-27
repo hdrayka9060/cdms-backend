@@ -99,6 +99,26 @@ export class AccountingController {
     return { message: 'Expense deleted', data: null };
   }
 
+  @Get('reconditioning-spends')
+  @RequirePermission(AppModule.ACCOUNTING, PermissionAction.VIEW)
+  @ApiOperation({
+    summary: 'List vehicle reconditioning spends (cost-of-goods)',
+    description:
+      'Read-only, flattened list of every vehicle spend (repairs/service/parts/etc). ' +
+      'These are cost-of-goods already folded into gross margin at sale time — surfaced ' +
+      'here for visibility only, never written to the operating-expense ledger, so they ' +
+      'are not double-counted against profit. Optional startDate/endDate filter on the spend date.',
+  })
+  @ApiQuery({ name: 'startDate', required: false })
+  @ApiQuery({ name: 'endDate', required: false })
+  async getReconditioningSpends(
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+  ) {
+    const data = await this.service.getReconditioningSpends(startDate, endDate);
+    return { message: 'Reconditioning spends', data };
+  }
+
   @Get('profit-loss')
   @RequirePermission(AppModule.ACCOUNTING, PermissionAction.VIEW)
   @ApiOperation({ summary: 'Get P&L report', description: 'Monthly profit and loss breakdown for a date range.' })

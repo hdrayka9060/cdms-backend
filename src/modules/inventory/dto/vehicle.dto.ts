@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
-  IsNotEmpty, IsString, IsNumber, IsEnum, IsOptional, IsArray, Min, Max, IsInt,
+  IsNotEmpty, IsString, IsNumber, IsEnum, IsOptional, IsArray, Min, Max, IsInt, IsBoolean,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { VehicleStatus, HostingType, FuelType, Transmission } from '../schemas/vehicle.schema';
@@ -27,8 +27,14 @@ export class CreateVehicleDto {
   @IsOptional() @IsString() bodyType?: string;
   @ApiPropertyOptional({ description: 'Trim / series (e.g. "XSE").' }) @IsOptional() @IsString() trim?: string;
   @ApiPropertyOptional({ description: 'Engine summary (e.g. "2.0L · 4-cyl").' }) @IsOptional() @IsString() engine?: string;
+  @ApiPropertyOptional({ description: 'Drive configuration (e.g. "FWD", "AWD", "4X4").' }) @IsOptional() @IsString() drivetrain?: string;
+  @ApiPropertyOptional({ description: 'Engine displacement (e.g. "3.6 L").' }) @IsOptional() @IsString() engineSize?: string;
+  @ApiPropertyOptional({ description: 'Interior colour.' }) @IsOptional() @IsString() interiorColor?: string;
+  @ApiPropertyOptional({ description: 'Number of doors.' }) @IsOptional() @IsInt() @Min(0) doors?: number;
   @ApiPropertyOptional({ enum: VehicleStatus }) @IsOptional() @IsEnum(VehicleStatus) status?: VehicleStatus;
   @ApiPropertyOptional({ enum: HostingType }) @IsOptional() @IsEnum(HostingType) hosting?: HostingType;
+  @ApiPropertyOptional({ description: 'Show on the public dealer website.' })
+  @IsOptional() @IsBoolean() publishedToWebsite?: boolean;
   @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() features?: string[];
   @ApiPropertyOptional({ description: 'Optional SellerLead ObjectId. Omit/null = "Self" (in-house).' })
   @IsOptional() @IsString() seller?: string | null;
@@ -47,11 +53,17 @@ export class UpdateVehicleDto {
   @IsOptional() @IsNumber() @Min(0) discount?: number;
   @ApiPropertyOptional({ enum: VehicleStatus }) @IsOptional() @IsEnum(VehicleStatus) status?: VehicleStatus;
   @ApiPropertyOptional({ enum: HostingType }) @IsOptional() @IsEnum(HostingType) hosting?: HostingType;
+  @ApiPropertyOptional({ description: 'Show on the public dealer website.' })
+  @IsOptional() @IsBoolean() publishedToWebsite?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsString() color?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() vin?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() bodyType?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() trim?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() engine?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() drivetrain?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() engineSize?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() interiorColor?: string;
+  @ApiPropertyOptional() @IsOptional() @IsInt() @Min(0) doors?: number;
   @ApiPropertyOptional({ enum: FuelType }) @IsOptional() @IsEnum(FuelType) fuelType?: FuelType;
   @ApiPropertyOptional({ enum: Transmission }) @IsOptional() @IsEnum(Transmission) transmission?: Transmission;
   @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() features?: string[];
@@ -89,7 +101,9 @@ export class UpdateVehicleSpendDto {
 }
 
 export class VehicleQueryDto extends PaginationDto {
-  @ApiPropertyOptional({ enum: VehicleStatus }) @IsOptional() @IsEnum(VehicleStatus) status?: VehicleStatus;
+  // String (not @IsEnum) so the storefront/admin can pass the 'available'
+  // sentinel meaning "no status" (status=''), which findAll translates.
+  @ApiPropertyOptional({ description: "new | sold | available (='' no status)" }) @IsOptional() @IsString() status?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() company?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() model?: string;
   @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsNumber() @Min(0) minPrice?: number;

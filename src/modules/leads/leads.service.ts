@@ -28,17 +28,12 @@ import { ActivityService } from '../activity/activity.service';
  * vehicle would stay in 'sold' even after the lead became 'contacted' etc.,
  * which is the inconsistency this hook was added to fix.
  *
- * `new` is intentionally absent — demoting a closed lead all the way back to
- * 'new' is unusual and we'd rather fall back to UNSOLD than guess. CLOSED
- * itself is in the map for completeness (closed→closed is a no-op since the
- * transition detector requires a CHANGE).
+ * The vehicle lifecycle is now just NEW / SOLD / NONE(''). Only a CLOSED
+ * (sold) lead changes the car's status → SOLD. Every other lead state leaves
+ * the car simply available (NONE) via the fallback below.
  */
 const LEAD_TO_VEHICLE_STATUS: Partial<Record<LeadStatus, VehicleStatus>> = {
   [LeadStatus.CLOSED]: VehicleStatus.SOLD,
-  [LeadStatus.ARCHIVED]: VehicleStatus.UNSOLD,
-  [LeadStatus.TEST_DRIVE]: VehicleStatus.TEST_DRIVE,
-  [LeadStatus.CONTACTED]: VehicleStatus.PENDING,
-  [LeadStatus.NEGOTIATION]: VehicleStatus.PENDING,
 };
 
 @Injectable()
@@ -117,23 +112,45 @@ export class LeadsService {
     return { ...lead, log: hydratedLog };
   }
 
-  async create(dto: CreateLeadDto, userId: string): Promise<any> {
+  async create(dto: CreateLeadDto, userId: string, actorId?: string): Promise<any> {
+    // NOTE: `userId` is the actor's display NAME (used for timeline `by`), NOT
+    // an ObjectId. `actorId` is the real User _id, used to default the assignee.
     if (!isValidObjectId(dto.buyer) || !isValidObjectId(dto.vehicle)) {
       throw new BadRequestException('Invalid buyer or vehicle id');
     }
     const buyerObj = new Types.ObjectId(dto.buyer);
     const vehicleObj = new Types.ObjectId(dto.vehicle);
 
+    // Peel the sale details off the lead fields — they belong to the Sale, not
+    // the Lead schema, and only matter when the lead is created as CLOSED.
+    const { soldAt, amountPaid, paymentMethod, paymentStatus, saleDate, ...leadFields } = dto;
+    const closingOnCreate = dto.status === LeadStatus.CLOSED;
+
     // Guard 1: never let a lead be opened on a vehicle that's already sold —
     // the car isn't available anymore, so a new inquiry would be misleading.
     const vehicle = await this.vehicleModel
       .findOne({ _id: vehicleObj, isDeleted: false })
-      .select('status title');
+      .select('status title costPrice');
     if (!vehicle) throw new NotFoundException('Vehicle not found');
     if (vehicle.status === 'sold') {
       throw new ConflictException(
         `Vehicle "${vehicle.title}" is already sold; can't open a new lead on it.`,
       );
+    }
+
+    // A lead may only start life as CLOSED if the sale is actually captured —
+    // otherwise we'd get a "closed lead with an unsold car" (the exact
+    // data-integrity drift that broke the closed-count invariant). Validate the
+    // sale details up front and route through the same createSale path as
+    // /close so the car is sold, the Sale row exists, and the buyer's
+    // purchases[] is updated — all atomically-in-spirit.
+    if (closingOnCreate) {
+      if (!soldAt || soldAt <= 0) {
+        throw new BadRequestException('Sold price is required to create a closed lead.');
+      }
+      if (paymentStatus === 'partial' && (amountPaid === undefined || amountPaid <= 0)) {
+        throw new BadRequestException('Amount paid is required for a partial payment.');
+      }
     }
 
     // Guard 2: a buyer can only have one lead per vehicle that isn't archived.
@@ -153,15 +170,27 @@ export class LeadsService {
       );
     }
 
+    // Leads are never unassigned — default to whoever is creating it (by _id).
+    const assignedTo =
+      leadFields.assignedTo && isValidObjectId(leadFields.assignedTo)
+        ? leadFields.assignedTo
+        : actorId && isValidObjectId(actorId)
+          ? actorId
+          : undefined;
+
+    // Save as NEW when closing-on-create; createSale below flips it to closed
+    // with its own timeline entry, so we don't pre-stamp a bogus closed state.
     const lead = await new this.model({
-      ...dto,
+      ...leadFields,
+      assignedTo,
+      status: closingOnCreate ? LeadStatus.NEW : leadFields.status,
       timeline: [{ date: new Date(), action: 'Lead created', by: userId }],
     }).save();
     // Pull buyer + vehicle title for the activity label — small extra reads
     // but the dashboard surface really wants "John Doe → 2024 Civic", not
     // bare ObjectIds.
     const [b, v] = await Promise.all([
-      this.buyerModel.findOne({ _id: buyerObj }).select('buyerName').lean(),
+      this.buyerModel.findOne({ _id: buyerObj }).select('buyerName buyerEmail').lean(),
       this.vehicleModel.findOne({ _id: vehicleObj }).select('title vehicleNumber').lean(),
     ]);
     await this.activity.log({
@@ -173,6 +202,53 @@ export class LeadsService {
       byName: userId,
       meta: { source: dto.source, status: dto.status ?? 'new' },
     });
+
+    // Closing-on-create: run the unified sale flow (sale + vehicle sold +
+    // buyer purchase + lead closed + sibling-archive), mirroring closeLead.
+    if (closingOnCreate) {
+      await this.accountingService.createSale({
+        vehicleId: String(vehicleObj),
+        vehicleTitle: vehicle.title,
+        buyerName: b?.buyerName ?? 'Buyer',
+        buyerEmail: b?.buyerEmail,
+        salePrice: soldAt as number,
+        costPrice: (vehicle as any).costPrice ?? 0,
+        discount: 0,
+        amountPaid,
+        saleDate: saleDate ? new Date(saleDate) : new Date(),
+        paymentMethod: paymentMethod ?? 'cash',
+        paymentStatus: paymentStatus ?? 'paid',
+        notes: dto.notes ?? `Closed on creation · lead ${String(lead._id)}`,
+        buyerLeadId: String(buyerObj),
+        leadId: String(lead._id),
+        actorName: userId,
+      });
+      await this.activity.log({
+        module: 'leads',
+        action: 'closed',
+        entity: 'Lead',
+        entityId: lead._id,
+        label: `${b?.buyerName ?? 'Buyer'} bought ${vehicle.title} for $${Number(soldAt).toLocaleString()}`,
+        byName: userId,
+        meta: { soldAt, paymentMethod, paymentStatus, closedOnCreate: true },
+      });
+    }
+
+    // Mirror the inquiry onto the buyer's CRM record so the vehicle shows up
+    // under "Vehicles Interested" on the buyer detail page. $addToSet keeps it
+    // idempotent (no duplicate if they were already interested). Best-effort —
+    // a buyer-sync failure must never fail lead creation.
+    try {
+      await this.buyerModel.updateOne(
+        { _id: buyerObj, isDeleted: false },
+        { $addToSet: { interestedVehicles: vehicleObj } },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `lead create: buyer interestedVehicles sync failed buyer=${dto.buyer}: ${err}`,
+      );
+    }
+
     return this.findById(String(lead._id));
   }
 
@@ -228,6 +304,50 @@ export class LeadsService {
     const existing = await this.model.findOne({ _id: id, isDeleted: false });
     if (!existing) throw new NotFoundException('Lead not found');
 
+    // ── Terminal-state guards ────────────────────────────────────────────────
+    // Closing must go through /close (which records the sale). A plain PATCH to
+    // 'closed' would produce a closed lead with an unsold car — the exact drift
+    // we're eliminating.
+    if (dto.status === LeadStatus.CLOSED && existing.status !== LeadStatus.CLOSED) {
+      throw new BadRequestException(
+        'Use the Close Lead action to close a lead — it records the sale.',
+      );
+    }
+    // Once CLOSED, a lead can only be archived (which voids the sale) — never
+    // back into the pipeline.
+    if (
+      existing.status === LeadStatus.CLOSED &&
+      dto.status !== undefined &&
+      dto.status !== LeadStatus.CLOSED &&
+      dto.status !== LeadStatus.ARCHIVED
+    ) {
+      throw new ConflictException(
+        'A closed lead can only be archived; it cannot be moved back into the pipeline.',
+      );
+    }
+    // ARCHIVED is terminal — archived leads can't be recovered.
+    if (
+      existing.status === LeadStatus.ARCHIVED &&
+      dto.status !== undefined &&
+      dto.status !== LeadStatus.ARCHIVED
+    ) {
+      throw new ConflictException('Archived leads cannot be recovered.');
+    }
+    // Assignee + asked price are locked on terminal leads (closed / archived).
+    // Silently drop any attempted change so a bundled "archive" save — which
+    // resends them unchanged — still succeeds.
+    if (
+      existing.status === LeadStatus.CLOSED ||
+      existing.status === LeadStatus.ARCHIVED
+    ) {
+      delete (dto as { assignedTo?: unknown }).assignedTo;
+      delete (dto as { askedPrice?: unknown }).askedPrice;
+    }
+    // Otherwise a lead is never unassigned once it has one.
+    else if (!dto.assignedTo && 'assignedTo' in dto && existing.assignedTo) {
+      throw new BadRequestException('A lead cannot be unassigned.');
+    }
+
     // Setting an asked price for the first time (or changing it) auto-bumps
     // the pipeline to negotiation — unless the caller is explicitly setting a
     // terminal state (closed / dropped). Avoids forcing the user to remember
@@ -237,12 +357,10 @@ export class LeadsService {
       dto.askedPrice !== null &&
       Number(dto.askedPrice) > 0 &&
       Number(dto.askedPrice) !== Number(existing.askedPrice ?? 0);
-    const userDidntPickTerminal =
-      !dto.status || (dto.status !== LeadStatus.CLOSED && dto.status !== LeadStatus.ARCHIVED);
-    const effectiveStatus =
-      willSetAskedPrice && userDidntPickTerminal && existing.status !== LeadStatus.NEGOTIATION
-        ? LeadStatus.NEGOTIATION
-        : dto.status;
+    // Setting an asked price no longer auto-advances the pipeline to
+    // Negotiation (product decision) — staff move the status explicitly. The
+    // price change is still recorded in the timeline + activity feed below.
+    const effectiveStatus = dto.status;
 
     const $set: any = { ...dto };
     if (effectiveStatus) $set.status = effectiveStatus;
@@ -310,9 +428,8 @@ export class LeadsService {
     // Cascade the unwind so the vehicle, sale row, and buyer's purchases[]
     // entry don't drift out of sync with the lead's new state.
     //
-    // - The vehicle's status follows LEAD_TO_VEHICLE_STATUS (archived→unsold,
-    //   test_drive→test_drive, contacted/negotiation→pending). Falls back to
-    //   UNSOLD for anything not in the map (e.g. 'new').
+    // - The vehicle's status follows LEAD_TO_VEHICLE_STATUS: only CLOSED maps
+    //   to SOLD; every other lead state falls back to NONE (available).
     // - cleanupSoldArtifacts soft-deletes the Sale row and pulls the buyer's
     //   purchases[] entry. We pass archiveLeads: false because we've ALREADY
     //   updated this lead's status above — letting cleanup overwrite it to
@@ -325,7 +442,7 @@ export class LeadsService {
     ) {
       const vehicleId = String(existing.vehicle);
       const newVehicleStatus =
-        LEAD_TO_VEHICLE_STATUS[effectiveStatus] ?? VehicleStatus.UNSOLD;
+        LEAD_TO_VEHICLE_STATUS[effectiveStatus] ?? VehicleStatus.NONE;
       try {
         const counts = await this.accountingService.cleanupSoldArtifacts(
           vehicleId,
@@ -400,6 +517,40 @@ export class LeadsService {
       { new: true },
     );
     if (!lead) throw new NotFoundException('Lead not found');
+
+    // Mirror this communication onto the buyer's CRM record so it appears in
+    // the buyer detail page's Communication History, with the lead's vehicle
+    // attached (same as the interestedVehicles sync). Best-effort, add-only —
+    // lead-log edits/deletes don't propagate back.
+    try {
+      const vehId = entry.vehicle ?? existing.vehicle;
+      let vehicleTitle = '';
+      if (vehId) {
+        const v = await this.vehicleModel.findById(vehId).select('title').lean();
+        vehicleTitle = v?.title ?? '';
+      }
+      await this.buyerModel.updateOne(
+        { _id: existing.buyer, isDeleted: false },
+        {
+          $push: {
+            communications: {
+              _id: new Types.ObjectId(),
+              at: entry.date,
+              channel: entry.channel,
+              ...(vehId ? { vehicle: vehId } : {}),
+              vehicleTitle,
+              summary: entry.summary ?? '',
+              ...(entry.byStaff ? { byStaff: entry.byStaff } : {}),
+            },
+          },
+        },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `addLogEntry: buyer communications sync failed buyer=${String(existing.buyer)}: ${err}`,
+      );
+    }
+
     return this.findById(id);
   }
 
@@ -475,6 +626,34 @@ export class LeadsService {
       byName: userId,
       meta: { scheduledAt: dto.scheduledAt },
     });
+
+    // Mirror onto the buyer's CRM record so it appears under "Test Drives &
+    // Purchases" on the buyer detail page. The buyer mapper filters history by
+    // action === 'test_drive_booked', so we use that exact slug. Best-effort.
+    try {
+      const v = await this.vehicleModel
+        .findById(existing.vehicle)
+        .select('title')
+        .lean();
+      await this.buyerModel.updateOne(
+        { _id: existing.buyer, isDeleted: false },
+        {
+          $push: {
+            history: {
+              vehicleId: String(existing.vehicle),
+              vehicleTitle: v?.title ?? '',
+              action: 'test_drive_booked',
+              date: new Date(dto.scheduledAt),
+            },
+          },
+        },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `bookTestDrive: buyer history sync failed buyer=${String(existing.buyer)}: ${err}`,
+      );
+    }
+
     return this.findById(id);
   }
 
@@ -618,7 +797,7 @@ export class LeadsService {
           this.accountingService.cleanupSoldArtifacts(vehicleId),
           this.vehicleModel.updateOne(
             { _id: lead.vehicle, isDeleted: false },
-            { $set: { status: VehicleStatus.UNSOLD, soldAt: 0, soldDate: null } },
+            { $set: { status: VehicleStatus.NONE, soldAt: 0, soldDate: null } },
           ),
         ]);
       } catch (err) {

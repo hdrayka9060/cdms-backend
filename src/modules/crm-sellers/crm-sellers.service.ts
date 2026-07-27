@@ -1,10 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, FilterQuery, Types, isValidObjectId } from 'mongoose';
 import { SellerLead, SellerLeadDocument, SellerLeadStage } from './schemas/seller-lead.schema';
 import {
-  CreateSellerLeadDto, UpdateSellerLeadDto, CommunicateDto, ScheduleInspectionDto,
-  SellerVehicleInputDto,
+  CreateSellerLeadDto, UpdateSellerLeadDto, CommunicateDto, UpdateCommunicateDto,
+  ScheduleInspectionDto, SellerVehicleInputDto,
 } from './dto/seller-lead.dto';
 import { PaginationDto, PaginatedResult } from '../../common/dto/pagination.dto';
 import { InventoryService } from '../inventory/inventory.service';
@@ -46,6 +46,27 @@ export class CrmSellersService {
     private readonly globalActivity: ActivityService,
   ) {}
 
+  /**
+   * Reject a seller email that already belongs to another (non-deleted) seller.
+   * Case-insensitive exact match. `excludeId` skips the row being updated so a
+   * seller can re-save its own unchanged email. Soft-deleted sellers don't block
+   * — their email is free to reuse.
+   */
+  private async assertEmailAvailable(email: string, excludeId?: string): Promise<void> {
+    const normalized = email.trim();
+    if (!normalized) return;
+    const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const filter: FilterQuery<SellerLeadDocument> = {
+      isDeleted: false,
+      sellerEmail: { $regex: `^${escaped}$`, $options: 'i' },
+    };
+    if (excludeId) filter._id = { $ne: new Types.ObjectId(excludeId) };
+    const existing = await this.model.findOne(filter).select('_id sellerName').lean();
+    if (existing) {
+      throw new ConflictException(`A seller with email ${normalized} already exists.`);
+    }
+  }
+
   // ── Activity-log helper ─────────────────────────────────────────────────
   private async logActivity(id: string, entry: ActivityEntry): Promise<void> {
     await this.model.updateOne(
@@ -82,6 +103,8 @@ export class CrmSellersService {
 
   async create(dto: CreateSellerLeadDto, userId: string): Promise<any> {
     const { vehicles: vehicleInputs, ...sellerFields } = dto;
+
+    await this.assertEmailAvailable(sellerFields.sellerEmail);
 
     const seller = await new this.model(sellerFields).save();
     const sellerId = String(seller._id);
@@ -175,6 +198,14 @@ export class CrmSellersService {
     // Diff against the current doc so we can log a meaningful "Updated X" entry.
     const before = await this.model.findOne({ _id: id, isDeleted: false }).lean();
     if (!before) throw new NotFoundException('Seller lead not found');
+
+    // Block editing the email to one already used by another live seller.
+    if (
+      dto.sellerEmail !== undefined &&
+      String(dto.sellerEmail).trim().toLowerCase() !== String(before.sellerEmail ?? '').trim().toLowerCase()
+    ) {
+      await this.assertEmailAvailable(dto.sellerEmail, id);
+    }
 
     const lead = await this.model.findOneAndUpdate(
       { _id: id, isDeleted: false },
@@ -300,6 +331,59 @@ export class CrmSellersService {
       label: `Logged ${dto.channel}: ${dto.message.slice(0, 80)}${dto.message.length > 80 ? '…' : ''}`,
       by: userId,
       meta: { channel: dto.channel },
+    });
+    return this.findById(id);
+  }
+
+  async updateCommunication(
+    id: string,
+    commId: string,
+    dto: UpdateCommunicateDto,
+    userId?: string,
+  ): Promise<any> {
+    if (!isValidObjectId(id) || !isValidObjectId(commId)) {
+      throw new BadRequestException('Invalid id');
+    }
+    // Positional `$` targets the matched communications element — the filter
+    // MUST include `communications._id` for `$` to resolve.
+    const $set: Record<string, unknown> = {};
+    if (dto.message !== undefined) $set['communications.$.message'] = dto.message;
+    if (dto.channel !== undefined) $set['communications.$.channel'] = dto.channel;
+    if (Object.keys($set).length === 0) {
+      throw new BadRequestException('Nothing to update');
+    }
+    const lead = await this.model.findOneAndUpdate(
+      { _id: id, isDeleted: false, 'communications._id': new Types.ObjectId(commId) },
+      { $set },
+      { new: true },
+    );
+    if (!lead) throw new NotFoundException('Communication not found');
+    await this.logActivity(id, {
+      action: 'communication_edited',
+      label: dto.message
+        ? `Edited a logged communication: ${dto.message.slice(0, 60)}${dto.message.length > 60 ? '…' : ''}`
+        : 'Edited a logged communication',
+      by: userId,
+      meta: { commId },
+    });
+    return this.findById(id);
+  }
+
+  async deleteCommunication(id: string, commId: string, userId?: string): Promise<any> {
+    if (!isValidObjectId(id) || !isValidObjectId(commId)) {
+      throw new BadRequestException('Invalid id');
+    }
+    const lead = await this.model.findOneAndUpdate(
+      { _id: id, isDeleted: false },
+      { $pull: { communications: { _id: new Types.ObjectId(commId) } } },
+      { new: true },
+    );
+    if (!lead) throw new NotFoundException('Seller lead not found');
+    await this.logActivity(id, {
+      action: 'communication_deleted',
+      label: 'Removed a logged communication',
+      by: userId,
+      meta: { commId },
     });
     return this.findById(id);
   }

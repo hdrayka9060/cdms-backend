@@ -47,7 +47,25 @@ export class SellerLead {
   @Prop({ type: String, enum: SellerLeadStage, default: SellerLeadStage.NEW }) stage: SellerLeadStage;
   @Prop() inspectionDate: Date;
   @Prop({ type: Types.ObjectId, ref: 'User' }) assignedTo: Types.ObjectId;
-  @Prop({ type: [{ type: String, channel: String, message: String, sentAt: Date, sentBy: String }], default: [] }) communications: any[];
+  /**
+   * Logged communications (email / sms / whatsapp / call).
+   *
+   * Every subfield uses the explicit `{ type: X }` form. The previous shorthand
+   * (`{ type: String, channel: String, ... }`) tripped the Mongoose footgun where
+   * `type: String` at the top of an array-element spec makes Mongoose treat each
+   * element as a plain String — so `$push`ing a full object silently failed. Same
+   * rule the `activity[]` field below already follows.
+   */
+  @Prop({
+    type: [{
+      channel: { type: String, required: true },
+      message: { type: String, required: true },
+      sentAt: { type: Date, default: Date.now },
+      sentBy: { type: String },
+    }],
+    default: [],
+  })
+  communications: { channel: string; message: string; sentAt: Date; sentBy?: string }[];
 
   /**
    * Audit / activity log. Each entry is one notable event on this seller —

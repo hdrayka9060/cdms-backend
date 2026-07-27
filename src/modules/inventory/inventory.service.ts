@@ -1,6 +1,6 @@
 import {
   Injectable, Logger, NotFoundException, ConflictException, BadRequestException,
-  Inject, forwardRef,
+  Inject, forwardRef, OnModuleInit,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -10,18 +10,48 @@ import { Vehicle, VehicleDocument, VehicleStatus } from './schemas/vehicle.schem
 import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto } from './dto/vehicle.dto';
 import { PaginatedResult } from '../../common/dto/pagination.dto';
 import { SellerLead, SellerLeadDocument } from '../crm-sellers/schemas/seller-lead.schema';
+import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
+import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
+import { CalendarEvent, CalendarEventDocument } from '../calendar/schemas/calendar-event.schema';
+import { CommunicationLog, CommunicationLogDocument } from '../communication/schemas/communication-log.schema';
 import { AccountingService } from '../accounting/accounting.service';
 import { ActivityService } from '../activity/activity.service';
 import { VinDecodeService, DecodedVehicleFields } from './vin-decode.service';
 import { StorageService } from '../../common/storage/storage.service';
 
 @Injectable()
-export class InventoryService {
+export class InventoryService implements OnModuleInit {
   private readonly logger = new Logger(InventoryService.name);
+
+  /**
+   * One-time data migration: the vehicle lifecycle was collapsed to
+   * NEW / SOLD / NONE(''). Map every legacy status (inspection, unsold,
+   * test_drive, reserved, pending) onto NONE so those cars become "available".
+   * Idempotent — once migrated, the match set is empty and it's a no-op.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const legacy = ['inspection', 'unsold', 'test_drive', 'reserved', 'pending'];
+      const res = await this.vehicleModel.updateMany(
+        { status: { $in: legacy } },
+        { $set: { status: VehicleStatus.NONE } },
+      );
+      const n = (res as any).modifiedCount ?? 0;
+      if (n) this.logger.log(`vehicle-status migration: cleared legacy status on ${n} vehicle(s) → available`);
+    } catch (err) {
+      this.logger.error(
+        `vehicle-status migration failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   constructor(
     @InjectModel(Vehicle.name) private vehicleModel: Model<VehicleDocument>,
     @InjectModel(SellerLead.name) private sellerLeadModel: Model<SellerLeadDocument>,
+    @InjectModel(Lead.name) private leadModel: Model<LeadDocument>,
+    @InjectModel(BuyerLead.name) private buyerLeadModel: Model<BuyerLeadDocument>,
+    @InjectModel(CalendarEvent.name) private calendarModel: Model<CalendarEventDocument>,
+    @InjectModel(CommunicationLog.name) private commLogModel: Model<CommunicationLogDocument>,
     // forwardRef: AccountingModule already imports the Vehicle schema, so DI
     // would deadlock without it.
     @Inject(forwardRef(() => AccountingService)) private accountingService: AccountingService,
@@ -102,7 +132,13 @@ export class InventoryService {
     const skip = (page - 1) * limit;
 
     const filter: FilterQuery<VehicleDocument> = { isDeleted: false };
-    if (status) filter.status = status;
+    // 'available' is the sentinel for "no status" (status=''); a plain empty
+    // string wouldn't survive query-param transport. 'new'/'sold' filter directly.
+    if (status === 'available') filter.status = '';
+    else if (status) filter.status = status;
+    // Public dealer-website listing passes this to show only published cars.
+    const publishedToWebsite = (query as any).publishedToWebsite;
+    if (publishedToWebsite !== undefined) filter.publishedToWebsite = publishedToWebsite;
     if (company) filter.company = { $regex: company, $options: 'i' };
     if (model) filter.model = { $regex: model, $options: 'i' };
     if (fuelType) filter.fuelType = fuelType;
@@ -289,9 +325,12 @@ export class InventoryService {
 
   /**
    * Record a reconditioning spend on a vehicle (repair/service/parts/etc).
-   * Blocked once the vehicle is sold — its cost basis is already locked into
-   * the Sale snapshot. The spend `by` is captured as a name string so the
-   * Spends tab can render it without a populate.
+   * Allowed even after the vehicle is sold. Every spend is mirrored into the
+   * expense ledger (category 'reconditioning') so it appears in Accounting and
+   * counts toward Total Expenses exactly once; for a sold vehicle the Sale's
+   * `totalSpend` snapshot is re-synced too so the per-row margin stays accurate.
+   * The spend `by` is captured as a name string so the Spends tab can render it
+   * without a populate.
    */
   async addSpend(
     id: string,
@@ -300,9 +339,6 @@ export class InventoryService {
   ): Promise<VehicleDocument> {
     const vehicle = await this.vehicleModel.findOne({ _id: id, isDeleted: false });
     if (!vehicle) throw new NotFoundException('Vehicle not found');
-    if (vehicle.status === VehicleStatus.SOLD) {
-      throw new BadRequestException('Cannot add spends to a sold vehicle');
-    }
     const amount = Number(dto.amount) || 0;
     if (amount <= 0) throw new BadRequestException('Spend amount must be greater than 0');
 
@@ -319,6 +355,38 @@ export class InventoryService {
     };
     vehicle.spends.push(entry as any);
     const saved = await vehicle.save();
+    const savedEntry = saved.spends[saved.spends.length - 1] as any;
+
+    // Mirror the spend into the expense ledger (category 'reconditioning').
+    try {
+      await this.accountingService.upsertSpendExpense({
+        vehicleId: String(saved._id),
+        spendId: String(savedEntry._id),
+        vehicleTitle: saved.title,
+        amount,
+        date: entry.date,
+        description: entry.description,
+      });
+    } catch (err) {
+      this.logger.error(
+        `addSpend expense mirror failed for vehicleId=${id}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+
+    // Keep a sold vehicle's Sale snapshot in step (per-row margin display).
+    try {
+      const total = (saved.spends ?? []).reduce(
+        (s: number, x: any) => s + (Number(x.amount) || 0),
+        0,
+      );
+      await this.accountingService.syncSaleSpendForVehicle(id, total);
+    } catch (err) {
+      this.logger.error(
+        `addSpend sale re-sync failed for vehicleId=${id}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
 
     await this.activity.log({
       module: 'inventory',
@@ -355,9 +423,19 @@ export class InventoryService {
       byId: user?._id,
     });
 
+    // Remove the mirrored expense-ledger row so it drops out of Accounting.
+    try {
+      await this.accountingService.removeSpendExpense(spendId);
+    } catch (err) {
+      this.logger.error(
+        `removeSpend expense mirror delete failed for spendId=${spendId}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+
     // If the vehicle has already been sold, its Sale row carries a snapshot of
-    // the spend total — re-sync so the P&L and per-row margin reflect the
-    // deletion. Best-effort: the spend has already been pulled.
+    // the spend total — re-sync so the per-row margin reflects the deletion.
+    // Best-effort: the spend has already been pulled.
     try {
       const total = (vehicle.spends ?? []).reduce(
         (s: number, x: any) => s + (Number(x.amount) || 0),
@@ -413,6 +491,23 @@ export class InventoryService {
       byId: user?._id,
     });
 
+    // Keep the mirrored expense-ledger row in step with the edited spend.
+    try {
+      await this.accountingService.upsertSpendExpense({
+        vehicleId: String(saved._id),
+        spendId: String(entry._id),
+        vehicleTitle: saved.title,
+        amount: Number(entry.amount) || 0,
+        date: entry.date ? new Date(entry.date) : new Date(),
+        description: entry.description ?? '',
+      });
+    } catch (err) {
+      this.logger.error(
+        `updateSpend expense mirror sync failed for vehicleId=${id}`,
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
+
     // Keep the sold vehicle's Sale snapshot in step with the edited amount.
     try {
       const total = (saved.spends ?? []).reduce(
@@ -427,6 +522,76 @@ export class InventoryService {
       );
     }
     return saved;
+  }
+
+  /**
+   * Per-vehicle Activity tab data (all lifetime, no date window):
+   *   - views      — storefront opens (vehicle.traffic.views, bumped by the
+   *                  public vehicle-detail endpoint)
+   *   - inquiries  — website-sourced leads for this vehicle (any status)
+   *   - testDrives — test-drive calendar events booked for this vehicle
+   *   - logs       — merged, newest-first communication log across the four
+   *                  sources that can reference this vehicle: the standalone
+   *                  communication_logs collection, lead logs (lead.vehicle),
+   *                  buyer comms (communication.vehicle), and seller comms
+   *                  (attached via the seller-lead ↔ vehicle link).
+   */
+  async getVehicleActivity(id: string): Promise<{
+    views: number;
+    inquiries: number;
+    testDrives: number;
+    logs: { date: string; channel: string; summary: string; by: string; source: string }[];
+  }> {
+    if (!isValidObjectId(id)) throw new BadRequestException('Invalid vehicle id');
+    const vehicle = await this.vehicleModel.findOne({ _id: id, isDeleted: false }).lean();
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    const vehicleObj = new Types.ObjectId(id);
+
+    // Seller comms have no per-entry vehicle ref — associate them via the
+    // seller lead(s) that list this vehicle, or the vehicle's own seller link.
+    const sellerOr: any[] = [{ vehicles: vehicleObj }];
+    if ((vehicle as any).seller) sellerOr.push({ _id: (vehicle as any).seller });
+
+    const [inquiries, testDrives, commLogs, leads, buyers, sellers] = await Promise.all([
+      this.leadModel.countDocuments({ vehicle: vehicleObj, source: 'website', isDeleted: false }),
+      this.calendarModel.countDocuments({ eventType: 'test_drive', vehicle: vehicleObj, isDeleted: false }),
+      this.commLogModel.find({ linkedVehicle: vehicleObj }).sort({ createdAt: -1 }).limit(50).lean(),
+      this.leadModel.find({ vehicle: vehicleObj, isDeleted: false }).select('log').lean(),
+      this.buyerLeadModel.find({ 'communications.vehicle': vehicleObj, isDeleted: false }).select('communications').lean(),
+      this.sellerLeadModel.find({ $or: sellerOr, isDeleted: false }).select('communications').lean(),
+    ]);
+
+    const iso = (d: any) => (d ? new Date(d).toISOString() : new Date(0).toISOString());
+    const logs: { date: string; channel: string; summary: string; by: string; source: string }[] = [];
+
+    for (const c of commLogs as any[]) {
+      logs.push({ date: iso(c.createdAt), channel: c.channel, summary: c.message || c.subject || '', by: c.recipientName || '', source: 'communication' });
+    }
+    for (const l of leads as any[]) {
+      for (const e of l.log ?? []) {
+        logs.push({ date: iso(e.date), channel: e.channel, summary: e.summary || '', by: e.by || '', source: 'lead' });
+      }
+    }
+    for (const b of buyers as any[]) {
+      for (const e of b.communications ?? []) {
+        if (String(e.vehicle) !== String(id)) continue; // only comms about THIS vehicle
+        logs.push({ date: iso(e.at), channel: e.channel, summary: e.summary || '', by: e.by || '', source: 'buyer' });
+      }
+    }
+    for (const s of sellers as any[]) {
+      for (const e of s.communications ?? []) {
+        logs.push({ date: iso(e.sentAt), channel: e.channel, summary: e.message || '', by: e.sentBy || '', source: 'seller' });
+      }
+    }
+    // Newest first (ISO strings sort lexicographically).
+    logs.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+    return {
+      views: (vehicle as any).traffic?.views ?? 0,
+      inquiries,
+      testDrives,
+      logs: logs.slice(0, 50),
+    };
   }
 
   async softDelete(id: string, userId?: string): Promise<void> {
@@ -458,29 +623,33 @@ export class InventoryService {
       );
     }
 
-    // If the vehicle was sold, deleting it implicitly reverses the sale:
-    //   - the Sale row gets soft-deleted (it references a deleted vehicle)
-    //   - the buyer's purchases[] entry for this car gets pulled
-    //   - the closed lead is archived (audit trail of "this was sold once")
-    // Otherwise the dealer would be left with a sale referencing a
-    // non-existent vehicle and a "closed" lead pointing into the void.
-    if (vehicle.status === VehicleStatus.SOLD) {
-      try {
-        const counts = await this.accountingService.cleanupSoldArtifacts(id);
-        this.logger.log(
-          `vehicle-delete cascade vehicleId=${id} ` +
-          `archivedLeads=${counts.archivedLeads} ` +
-          `deletedSales=${counts.deletedSales} ` +
-          `pulledPurchases=${counts.pulledPurchases}`,
-        );
-      } catch (err) {
-        // Vehicle is already soft-deleted — never reject. Log so we can see
-        // when the cascade misfires.
-        this.logger.error(
-          `vehicle-delete cascade failed for vehicleId=${id}`,
-          err instanceof Error ? err.stack : String(err),
-        );
-      }
+    // Deleting a vehicle removes it from the books, so ALWAYS clean up any
+    // accounting artefacts tied to it — not only when its current status is
+    // 'sold'. A car can carry a live Sale even while its status has drifted to
+    // something else (e.g. moved to 'inspection' after a sale, or edited), and
+    // leaving that Sale behind orphans it to a deleted vehicle — inflating the
+    // sales count and keeping its cost/reconditioning in the ledgers. cleanup
+    // is idempotent: a no-op when there's nothing to clean.
+    //   - soft-deletes every live Sale row for this vehicle
+    //   - pulls the buyer's purchases[] entry
+    //   - archives the closed lead (audit trail of "this was sold once")
+    // (Reconditioning spends live on the vehicle itself and auto-drop from the
+    // ledger via the isDeleted filter once the vehicle is soft-deleted.)
+    try {
+      const counts = await this.accountingService.cleanupSoldArtifacts(id);
+      this.logger.log(
+        `vehicle-delete cascade vehicleId=${id} prevStatus=${vehicle.status} ` +
+        `archivedLeads=${counts.archivedLeads} ` +
+        `deletedSales=${counts.deletedSales} ` +
+        `pulledPurchases=${counts.pulledPurchases}`,
+      );
+    } catch (err) {
+      // Vehicle is already soft-deleted — never reject. Log so we can see
+      // when the cascade misfires.
+      this.logger.error(
+        `vehicle-delete cascade failed for vehicleId=${id}`,
+        err instanceof Error ? err.stack : String(err),
+      );
     }
   }
 
@@ -597,6 +766,9 @@ export class InventoryService {
             bodyType: str(record.bodyType) || decoded?.bodyType,
             trim: str(record.trim) || decoded?.trim,
             engine: str(record.engine) || decoded?.engine,
+            drivetrain: str(record.drivetrain) || decoded?.drivetrain,
+            engineSize: str(record.engineSize) || decoded?.engineSize,
+            doors: str(record.doors) ? parseInt(str(record.doors), 10) : decoded?.doors,
             hosting: enumCell(record.hosting),
             description: record.description,
           },
@@ -633,8 +805,8 @@ export class InventoryService {
    *
    * Spec: newly added vehicles start as `new` (schema default). If nobody
    * moves them off `new` within 48 hours of createdAt, the system flips
-   * them to `pending`. Any manual status change moves the vehicle out of
-   * this query's scope, so the timer is effectively "since createdAt,
+   * them to NONE (no status / available). Any status change moves the vehicle
+   * out of this query's scope, so the timer is effectively "since createdAt,
    * while still NEW".
    *
    * Runs hourly so the worst-case slop past the 2-day mark is ~1 hour.
@@ -658,12 +830,12 @@ export class InventoryService {
     await this.vehicleModel.updateMany(
       { _id: { $in: ids } },
       {
-        $set: { status: VehicleStatus.PENDING },
+        $set: { status: VehicleStatus.NONE },
         $push: {
           history: {
             field: 'status',
             value: VehicleStatus.NEW,
-            newValue: VehicleStatus.PENDING,
+            newValue: VehicleStatus.NONE,
             changedAt: new Date(),
             changedBy: 'system:auto-expire',
           },
@@ -671,7 +843,7 @@ export class InventoryService {
       },
     );
     this.logger.log(
-      `auto-expire: flipped ${stale.length} 'new' vehicle(s) → 'pending' (>2 days)`,
+      `auto-expire: cleared 'new' status on ${stale.length} vehicle(s) → available (>2 days)`,
     );
 
     // Per-vehicle activity log so the Dashboard "Recent Activity" feed
@@ -684,10 +856,10 @@ export class InventoryService {
           action: 'status-changed',
           entity: 'Vehicle',
           entityId: v._id,
-          label: `${v.title} (${v.vehicleNumber}) auto-expired: new → pending`,
+          label: `${v.title} (${v.vehicleNumber}) auto-expired: new → available`,
           meta: {
             from: VehicleStatus.NEW,
-            to: VehicleStatus.PENDING,
+            to: VehicleStatus.NONE,
             auto: true,
             reason: '2-day timeout',
           },

@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { Vehicle, VehicleDocument } from '../inventory/schemas/vehicle.schema';
+import { Vehicle, VehicleDocument, VehicleStatus } from '../inventory/schemas/vehicle.schema';
 import { SellerLead, SellerLeadDocument } from '../crm-sellers/schemas/seller-lead.schema';
 import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
 import { Sale, SaleDocument, Expense, ExpenseDocument } from '../accounting/schemas/accounting.schema';
@@ -16,6 +16,12 @@ export interface DashboardStatBlock {
   totalVehicles: number;
   vehiclesSold: number;
   totalRevenue: number;
+  // Full-cost expenses (matches AccountingService.getSummary):
+  //   totalExpenses = totalOperational + totalReconditioning + totalCostOfVehicles
+  totalExpenses: number;
+  totalOperational: number;
+  totalReconditioning: number;
+  totalCostOfVehicles: number;
   totalProfit: number;
   activeLeads: number;
   pendingTestDrives: number;
@@ -68,39 +74,67 @@ export class DashboardService {
       return { [field]: r };
     };
 
-    const vehicleFilter = { isDeleted: false, ...inRange('createdAt') };
+    // Sales in the window — drives the period-scoped money KPIs (revenue /
+    // expenses / profit). Money is a FLOW metric: the period selector applies.
     const soldFilter = { isDeleted: false, ...inRange('saleDate') };
+    // Total Vehicles + Vehicles Sold are FLOW metrics — they follow the period
+    // selector. Total Vehicles = vehicles ADDED in the window (createdAt);
+    // Vehicles Sold = vehicles whose sale landed in the window (soldDate). We
+    // count sold *vehicles* (status=sold) rather than Sale rows so the number
+    // can't drift from the true sold-vehicle count. All-Time (no range) → all
+    // non-deleted / all sold. Both current + previous blocks compute their own
+    // window, so the trend-delta chip is meaningful here.
+    const allVehiclesFilter = { isDeleted: false, ...inRange('createdAt') };
+    const soldVehiclesFilter = {
+      isDeleted: false,
+      status: VehicleStatus.SOLD,
+      ...inRange('soldDate'),
+    };
+    // Active Leads is a STOCK metric — the current open pipeline, not "leads
+    // created this period" — so it ignores the window (matches the Leads page).
     const leadFilter = {
       isDeleted: false,
       status: { $nin: ['closed', 'archived'] },
-      ...inRange('createdAt'),
     };
-    // "Pending" means scheduled AND still in the future — a STATE, not a
-    // window-bound metric. We deliberately ignore the date-range filter so
-    // a user looking at "This Month" doesn't see a count for May that's
-    // already in the past. Both current + previous blocks compute the same
-    // number with the same `now`, so the trend delta is 0 (chip hidden).
+    // "Pending" = a test drive whose scheduled start time is still in the
+    // future (startDateTime > now), excluding cancelled / no-show. A STATE
+    // metric, deliberately window-independent so "This Month" doesn't hide an
+    // upcoming drive scheduled for next month. Both current + previous blocks
+    // compute the same number with the same `now`, so the delta chip is hidden.
     const testDriveFilter = {
       eventType: 'test_drive',
-      status: 'scheduled',
       isDeleted: false,
+      status: { $nin: ['cancelled', 'no_show'] },
       startDateTime: { $gt: new Date() },
     };
 
     const [
-      totalVehicles, vehiclesSold, revenueAndProfit, activeLeads, pendingTestDrives,
+      totalVehicles, vehiclesSold, salesAgg, operationalAgg, activeLeads, pendingTestDrives,
     ] = await Promise.all([
-      this.vehicleModel.countDocuments(vehicleFilter),
-      this.saleModel.countDocuments(soldFilter),
+      // Stock counts — un-windowed so they match Inventory / Leads reality.
+      this.vehicleModel.countDocuments(allVehiclesFilter),
+      this.vehicleModel.countDocuments(soldVehiclesFilter),
       this.saleModel.aggregate([
         { $match: soldFilter },
         {
           $group: {
             _id: null,
             revenue: { $sum: { $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] } },
-            // Profit = revenue − (cost + reconditioning spend). Matches the
-            // accounting page's gross-margin definition.
-            profit: { $sum: { $subtract: [{ $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] }, { $add: [{ $ifNull: ['$costPrice', 0] }, { $ifNull: ['$totalSpend', 0] }] }] } },
+            // Cost of vehicles sold (recognised at sale). Reconditioning is NOT
+            // taken from the sale here — it lives in the expense ledger now.
+            cost: { $sum: { $ifNull: ['$costPrice', 0] } },
+          },
+        },
+      ]),
+      // Expenses in the window, split into operating vs reconditioning — matches
+      // AccountingService.getSummary so the dashboard and accounting agree.
+      this.expenseModel.aggregate([
+        { $match: { isDeleted: false, ...inRange('date') } },
+        {
+          $group: {
+            _id: null,
+            operational: { $sum: { $cond: [{ $eq: ['$category', 'reconditioning'] }, 0, '$amount'] } },
+            reconditioning: { $sum: { $cond: [{ $eq: ['$category', 'reconditioning'] }, '$amount', 0] } },
           },
         },
       ]),
@@ -108,11 +142,25 @@ export class DashboardService {
       this.calendarModel.countDocuments(testDriveFilter),
     ]);
 
+    const revenue = salesAgg[0]?.revenue ?? 0;
+    const cost = salesAgg[0]?.cost ?? 0;
+    const operational = operationalAgg[0]?.operational ?? 0;
+    const spend = operationalAgg[0]?.reconditioning ?? 0;
+    // Full-cost expenses, identical to AccountingService.getSummary:
+    //   Total Expenses = Operational + Reconditioning + Cost(of sold)
+    //   Profit         = Revenue − Total Expenses
+    // Reconditioning comes from the expense ledger (recognised when incurred);
+    // cost of vehicles is recognised at sale. Each spend counted once.
+    const totalExpenses = operational + spend + cost;
     return {
       totalVehicles,
       vehiclesSold,
-      totalRevenue: revenueAndProfit[0]?.revenue ?? 0,
-      totalProfit: revenueAndProfit[0]?.profit ?? 0,
+      totalRevenue: revenue,
+      totalExpenses,
+      totalOperational: operational,
+      totalReconditioning: spend,
+      totalCostOfVehicles: cost,
+      totalProfit: revenue - totalExpenses,
       activeLeads,
       pendingTestDrives,
     };
@@ -151,13 +199,15 @@ export class DashboardService {
   }
 
   /**
-   * Three chart data sets:
-   *   - revenueAndProfit: monthly aggregation over the last 12 months (always
-   *     12 months — the period selector drives KPIs, the trend chart is
-   *     deliberately fixed so users can see seasonality.
+   * Three chart data sets, all over a fixed last-12-months window (the period
+   * selector drives the KPIs; the trend charts are deliberately fixed so users
+   * can see seasonality):
+   *   - revenueAndProfit: monthly net revenue + full-cost net profit.
    *   - vehiclesByType: count by bodyType (free-text from the VIN decoder).
    *     Top 5 buckets + "Other" so the donut doesn't get cluttered.
-   *   - monthlyExpenses: sum of Expense.amount per month, last 12 months.
+   *   - monthlyExpenses: monthly Total Expenses — Operational + Reconditioning
+   *     + Cost-of-vehicles-sold — matching the accounting page's definition
+   *     (NOT operating expenses alone).
    */
   async getCharts(): Promise<{
     revenueAndProfit: { _id: { year: number; month: number }; revenue: number; profit: number }[];
@@ -167,17 +217,18 @@ export class DashboardService {
     const now = new Date();
     const last12Months = new Date(now.getFullYear(), now.getMonth() - 11, 1);
 
-    const [revenueAndProfit, vehiclesByType, monthlyExpenses] = await Promise.all([
+    const [salesByMonth, vehiclesByType, opByMonth] = await Promise.all([
       this.saleModel.aggregate([
         { $match: { isDeleted: false, saleDate: { $gte: last12Months } } },
         {
           $group: {
             _id: { year: { $year: '$saleDate' }, month: { $month: '$saleDate' } },
             revenue: { $sum: { $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] } },
-            profit: { $sum: { $subtract: [{ $subtract: ['$salePrice', { $ifNull: ['$discount', 0] }] }, { $add: [{ $ifNull: ['$costPrice', 0] }, { $ifNull: ['$totalSpend', 0] }] }] } },
+            // Cost of vehicles sold that month (acquisition cost only).
+            // Reconditioning is captured in the expense ledger (opByMonth) now.
+            cost: { $sum: { $ifNull: ['$costPrice', 0] } },
           },
         },
-        { $sort: { '_id.year': 1, '_id.month': 1 } },
       ]),
       this.vehicleModel.aggregate([
         { $match: { isDeleted: false } },
@@ -199,9 +250,43 @@ export class DashboardService {
             total: { $sum: '$amount' },
           },
         },
-        { $sort: { '_id.year': 1, '_id.month': 1 } },
       ]),
     ]);
+
+    // Merge the sales (revenue + cost) and expense (operational + reconditioning)
+    // series by month. Build over the UNION of months so a month with expenses
+    // but no sales still shows its (negative) profit and its expense bar —
+    // matching the accounting page rather than silently dropping to zero.
+    const keyOf = (y: number, m: number) => `${y}-${m}`;
+    const revMap = new Map<string, number>();
+    const costMap = new Map<string, number>();
+    const opMap = new Map<string, number>();
+    for (const b of salesByMonth as any[]) {
+      revMap.set(keyOf(b._id.year, b._id.month), b.revenue ?? 0);
+      costMap.set(keyOf(b._id.year, b._id.month), b.cost ?? 0);
+    }
+    for (const e of opByMonth as any[]) {
+      // opByMonth.total already includes reconditioning (it's an expense row now).
+      opMap.set(keyOf(e._id.year, e._id.month), e.total ?? 0);
+    }
+
+    const allKeys = new Set<string>([...revMap.keys(), ...costMap.keys(), ...opMap.keys()]);
+    const revenueAndProfit: { _id: { year: number; month: number }; revenue: number; profit: number }[] = [];
+    const monthlyExpenses: { _id: { year: number; month: number }; total: number }[] = [];
+    for (const key of allKeys) {
+      const [year, month] = key.split('-').map(Number);
+      const revenue = revMap.get(key) ?? 0;
+      const cost = costMap.get(key) ?? 0;
+      const op = opMap.get(key) ?? 0;
+      // Net profit = Revenue − (cost of vehicles sold + all expenses). Full-cost,
+      // matches the accounting page. `op` already includes reconditioning.
+      revenueAndProfit.push({ _id: { year, month }, revenue, profit: revenue - cost - op });
+      // Total Expenses = Operational + Reconditioning (both in `op`) + Cost-of-vehicles-sold.
+      monthlyExpenses.push({ _id: { year, month }, total: op + cost });
+    }
+    const bySort = (a: any, b: any) => a._id.year - b._id.year || a._id.month - b._id.month;
+    revenueAndProfit.sort(bySort);
+    monthlyExpenses.sort(bySort);
 
     return { revenueAndProfit, vehiclesByType, monthlyExpenses };
   }

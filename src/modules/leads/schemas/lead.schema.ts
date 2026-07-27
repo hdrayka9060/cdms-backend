@@ -34,6 +34,8 @@ export enum LeadChannel {
   SMS = 'sms',
   /** Walk-in / in-person / face-to-face — anything without a digital channel. */
   OFFLINE = 'offline',
+  /** Public storefront form submission (Contact Us / Text Us Now). */
+  WEBSITE = 'website',
 }
 
 @Schema({ timestamps: true, collection: 'leads' })

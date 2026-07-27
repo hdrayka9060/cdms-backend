@@ -148,6 +148,98 @@ export class MailService implements OnModuleInit {
   }
 
   /**
+   * Invite attendees to a calendar event (physical OR virtual). Sent on event
+   * creation to the assignee + participants + customer. For virtual events we
+   * include the meeting link (Google Meet or a pasted link); for physical
+   * events we include the location. Best-effort — never breaks event creation.
+   */
+  async sendEventInvitation(opts: {
+    to: string | string[];
+    eventTitle: string;
+    whenText: string;
+    meetingType: 'physical' | 'virtual';
+    location?: string;
+    meetLink?: string;
+    organizerName?: string;
+  }): Promise<void> {
+    const to = (Array.isArray(opts.to) ? opts.to : [opts.to]).filter(Boolean).join(', ');
+    if (!to) return;
+    const subject = `Invitation: ${opts.eventTitle}`;
+    const html = renderEventInvitationHtml(opts);
+    const text = renderEventInvitationText(opts);
+    await this.send({ to, subject, html, text, contextTag: 'event-invite' });
+  }
+
+  /**
+   * Notify attendees that an event changed — a new time and/or a switch
+   * between physical and virtual. Called at most ONCE per update even when
+   * several things changed (the caller collapses the changes into a single
+   * `changesText`). Best-effort — never breaks the event update.
+   */
+  async sendEventUpdate(opts: {
+    to: string | string[];
+    eventTitle: string;
+    whenText: string;
+    changesText: string;
+    meetingType: 'physical' | 'virtual';
+    location?: string;
+    meetLink?: string;
+  }): Promise<void> {
+    const to = (Array.isArray(opts.to) ? opts.to : [opts.to]).filter(Boolean).join(', ');
+    if (!to) return;
+    const subject = `Updated: ${opts.eventTitle}`;
+    const html = renderEventUpdateHtml(opts);
+    const text = renderEventUpdateText(opts);
+    await this.send({ to, subject, html, text, contextTag: 'event-update' });
+  }
+
+  /**
+   * Notify the dealership of a new Finance Application submitted on the public
+   * website. Best-effort (never throws) — the visitor's submission must still
+   * succeed even if the notification can't be delivered. `fields` is the full
+   * set of captured form values (already label-friendly on the caller side is
+   * NOT required — keys are humanised here).
+   */
+  async sendFinanceApplication(opts: {
+    to: string;
+    applicantName: string;
+    applicantEmail: string;
+    applicantPhone: string;
+    vehicleOfInterest?: string;
+    fields: Record<string, unknown>;
+  }): Promise<void> {
+    if (!opts.to) return;
+    const subject = `New Finance Application — ${opts.applicantName || opts.applicantEmail}`;
+    const html = renderFinanceApplicationHtml(opts);
+    const text = renderFinanceApplicationText(opts);
+    await this.send({ to: opts.to, subject, html, text, contextTag: 'finance-application' });
+  }
+
+  /**
+   * Generic "new website inquiry" notification — sent to the dealership for
+   * EVERY public form submission (service, contact, text-us-now, get-more-info,
+   * car-finder, appointment, …). The Finance Application uses its own richer
+   * template (sendFinanceApplication); every other form funnels through here.
+   * Best-effort: the caller swallows failures so mail never blocks a submit.
+   */
+  async sendWebsiteInquiry(opts: {
+    to: string;
+    formLabel: string;
+    name: string;
+    email: string;
+    phone: string;
+    vehicleOfInterest?: string;
+    message?: string;
+    fields?: Record<string, unknown>;
+  }): Promise<void> {
+    if (!opts.to) return;
+    const subject = `New ${opts.formLabel} — ${opts.name || opts.email}`;
+    const html = renderWebsiteInquiryHtml(opts);
+    const text = renderWebsiteInquiryText(opts);
+    await this.send({ to: opts.to, subject, html, text, contextTag: 'website-inquiry' });
+  }
+
+  /**
    * Single send path.
    *
    * Default behaviour: swallow + warn (mail must never break a domain op).
@@ -197,8 +289,82 @@ export class MailService implements OnModuleInit {
 }
 
 // ── Templates ───────────────────────────────────────────────────────────────
-// Plain template literals. Branding can be upgraded later; the goal here is a
-// readable, click-through-able message that doesn't get caught in spam.
+// A single branded, table-based responsive shell wraps every email so they
+// read as legitimate transactional mail (header wordmark, card body, footer
+// with sender identity) rather than a lone coloured button on a white page.
+
+const BRAND = 'CDMS';
+
+/**
+ * Wrap body HTML in the shared branded email shell. Table-based layout for
+ * Outlook/Gmail compatibility; inline styles only (no <style> — many clients
+ * strip it). `preheader` is the hidden inbox-preview snippet.
+ */
+function emailShell(opts: { title: string; preheader?: string; bodyHtml: string }): string {
+  const year = new Date().getFullYear();
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light only">
+<title>${escapeHtml(opts.title)}</title>
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;">
+${opts.preheader ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#f1f5f9;">${escapeHtml(opts.preheader)}</div>` : ''}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:24px 12px;">
+  <tr><td align="center">
+    <table role="presentation" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#ffffff;border:1px solid #e2e8f0;border-radius:14px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+      <tr><td style="background:#0f172a;padding:20px 32px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+          <td style="font-size:18px;font-weight:700;letter-spacing:.4px;color:#ffffff;">
+            <span style="display:inline-block;width:26px;height:26px;line-height:26px;text-align:center;background:#2563eb;border-radius:7px;color:#ffffff;font-size:13px;margin-right:10px;vertical-align:middle;">◆</span>${BRAND}
+          </td>
+          <td align="right" style="font-size:12px;color:#94a3b8;">Dealer Management</td>
+        </tr></table>
+      </td></tr>
+      <tr><td style="padding:32px;color:#0f172a;font-size:15px;line-height:1.6;">${opts.bodyHtml}</td></tr>
+      <tr><td style="padding:18px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;line-height:1.5;">
+        This is an automated message from ${BRAND}. Please do not reply to this email.<br>
+        &copy; ${year} ${BRAND} · Dealer Management System
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>`;
+}
+
+/** A bulletproof-ish CTA button (table-cell background for Outlook). */
+function emailButton(href: string, label: string, color = '#2563eb'): string {
+  return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0;"><tr>
+    <td style="border-radius:8px;background:${color};">
+      <a href="${href}" style="display:inline-block;padding:13px 28px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px;">${escapeHtml(label)}</a>
+    </td></tr></table>`;
+}
+
+/** A light details panel of label/value rows. Values are pre-escaped HTML. */
+function infoPanel(rows: [string, string][]): string {
+  const trs = rows
+    .map(
+      ([label, value]) => `<tr>
+        <td style="padding:5px 0;font-size:13px;color:#64748b;font-weight:600;white-space:nowrap;vertical-align:top;width:64px;">${escapeHtml(label)}</td>
+        <td style="padding:5px 0 5px 16px;font-size:14px;color:#0f172a;">${value}</td>
+      </tr>`,
+    )
+    .join('');
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;margin:4px 0;">
+    <tr><td style="padding:14px 18px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0">${trs}</table></td></tr>
+  </table>`;
+}
+
+/** A small uppercase eyebrow label above the heading. */
+function eyebrow(text: string, color = '#2563eb'): string {
+  return `<p style="margin:0 0 6px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:${color};">${escapeHtml(text)}</p>`;
+}
+
+/** A "or open this link" fallback line for a button. */
+function linkFallback(url: string, lead = 'Or open this link:'): string {
+  return `<p style="font-size:13px;color:#64748b;margin:4px 0 0;">${escapeHtml(lead)}<br><a href="${url}" style="color:#2563eb;word-break:break-all;">${url}</a></p>`;
+}
 
 function renderInviteHtml(opts: {
   firstName: string;
@@ -210,18 +376,20 @@ function renderInviteHtml(opts: {
   const dealership = opts.dealershipName ?? 'CDMS';
   const inviter = opts.inviterName ?? 'Your administrator';
   const role = opts.roleName ? ` as <strong>${escapeHtml(opts.roleName)}</strong>` : '';
-  return `<!doctype html>
-<html><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #1f2937;">
-  <h2 style="color: #111827; margin-bottom: 8px;">You've been invited</h2>
-  <p>Hi ${escapeHtml(opts.firstName)},</p>
-  <p>${escapeHtml(inviter)} has invited you to join <strong>${escapeHtml(dealership)}</strong>${role} on CDMS — a complete dealership management platform.</p>
-  <p>Click the button below to set your password and log in:</p>
-  <p style="margin: 24px 0;">
-    <a href="${opts.inviteUrl}" style="display: inline-block; background: #2563eb; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">Accept invitation</a>
-  </p>
-  <p style="font-size: 13px; color: #6b7280;">Or copy this link into your browser:<br><a href="${opts.inviteUrl}">${opts.inviteUrl}</a></p>
-  <p style="font-size: 13px; color: #6b7280; margin-top: 24px;">This invitation expires in 7 days. If you weren't expecting this, you can ignore the email.</p>
-</body></html>`;
+  const body = `
+    ${eyebrow("You're invited")}
+    <h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;color:#0f172a;">Join ${escapeHtml(dealership)}</h1>
+    <p style="margin:0 0 12px;">Hi ${escapeHtml(opts.firstName)},</p>
+    <p style="margin:0 0 4px;color:#475569;">${escapeHtml(inviter)} has invited you to join <strong>${escapeHtml(dealership)}</strong>${role} on ${BRAND}. Set your password to activate your account.</p>
+    ${emailButton(opts.inviteUrl, 'Accept invitation')}
+    ${linkFallback(opts.inviteUrl, 'Or copy this link into your browser:')}
+    <p style="font-size:13px;color:#94a3b8;margin:20px 0 0;">This invitation expires in 7 days. If you weren't expecting it, you can safely ignore this email.</p>
+  `;
+  return emailShell({
+    title: `You've been invited to ${dealership}`,
+    preheader: `Set your password to join ${dealership} on ${BRAND}.`,
+    bodyHtml: body,
+  });
 }
 
 function renderInviteText(opts: {
@@ -248,17 +416,20 @@ function renderInviteText(opts: {
 
 function renderPasswordResetHtml(opts: { firstName?: string; resetUrl: string }): string {
   const name = opts.firstName ?? 'there';
-  return `<!doctype html>
-<html><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #1f2937;">
-  <h2 style="color: #111827; margin-bottom: 8px;">Reset your password</h2>
-  <p>Hi ${escapeHtml(name)},</p>
-  <p>We received a request to reset your CDMS password. Click the button below to choose a new one:</p>
-  <p style="margin: 24px 0;">
-    <a href="${opts.resetUrl}" style="display: inline-block; background: #2563eb; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">Reset password</a>
-  </p>
-  <p style="font-size: 13px; color: #6b7280;">Or copy this link:<br><a href="${opts.resetUrl}">${opts.resetUrl}</a></p>
-  <p style="font-size: 13px; color: #6b7280; margin-top: 24px;">This link expires in 1 hour. If you didn't request this, you can safely ignore the email.</p>
-</body></html>`;
+  const body = `
+    ${eyebrow('Password reset')}
+    <h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;color:#0f172a;">Reset your password</h1>
+    <p style="margin:0 0 12px;">Hi ${escapeHtml(name)},</p>
+    <p style="margin:0 0 4px;color:#475569;">We received a request to reset your ${BRAND} password. Choose a new one below.</p>
+    ${emailButton(opts.resetUrl, 'Reset password')}
+    ${linkFallback(opts.resetUrl)}
+    <p style="font-size:13px;color:#94a3b8;margin:20px 0 0;">This link expires in 1 hour. If you didn't request this, you can safely ignore this email — your password won't change.</p>
+  `;
+  return emailShell({
+    title: `Reset your ${BRAND} password`,
+    preheader: `Choose a new password for your ${BRAND} account.`,
+    bodyHtml: body,
+  });
 }
 
 function renderPasswordResetText(opts: { firstName?: string; resetUrl: string }): string {
@@ -278,17 +449,25 @@ function renderMeetingHtml(opts: {
   meetLink: string;
   organizerName?: string;
 }): string {
-  const organizer = opts.organizerName ? `${escapeHtml(opts.organizerName)} has invited you to a meeting` : `You've been invited to a meeting`;
-  return `<!doctype html>
-<html><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px; color: #1f2937;">
-  <h2 style="color: #111827; margin-bottom: 8px;">${escapeHtml(opts.eventTitle)}</h2>
-  <p>${organizer}.</p>
-  <p style="color:#374151;"><strong>When:</strong> ${escapeHtml(opts.whenText)}</p>
-  <p style="margin: 24px 0;">
-    <a href="${opts.meetLink}" style="display: inline-block; background: #7c3aed; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">Join with Google Meet</a>
-  </p>
-  <p style="font-size: 13px; color: #6b7280;">Or open this link:<br><a href="${opts.meetLink}">${opts.meetLink}</a></p>
-</body></html>`;
+  const organizer = opts.organizerName
+    ? `${escapeHtml(opts.organizerName)} has invited you to a meeting.`
+    : `You've been invited to a meeting.`;
+  const body = `
+    ${eyebrow('Meeting invitation')}
+    <h1 style="margin:0 0 12px;font-size:22px;line-height:1.3;color:#0f172a;">${escapeHtml(opts.eventTitle)}</h1>
+    <p style="margin:0 0 18px;color:#475569;">${organizer}</p>
+    ${infoPanel([
+      ['When', escapeHtml(opts.whenText)],
+      ['Where', 'Online video meeting'],
+    ])}
+    ${emailButton(opts.meetLink, 'Join the meeting')}
+    ${linkFallback(opts.meetLink)}
+  `;
+  return emailShell({
+    title: `Meeting invite: ${opts.eventTitle}`,
+    preheader: `${opts.eventTitle} · ${opts.whenText}`,
+    bodyHtml: body,
+  });
 }
 
 function renderMeetingText(opts: {
@@ -307,6 +486,272 @@ function renderMeetingText(opts: {
     `Join with Google Meet:`,
     opts.meetLink,
   ].join('\n');
+}
+
+// ── Calendar event templates ─────────────────────────────────────────────
+
+/**
+ * The "Where" value + optional Join CTA/link shared by the event invitation
+ * and update HTML templates.
+ */
+function eventVenue(opts: { meetingType: 'physical' | 'virtual'; location?: string; meetLink?: string }): {
+  whereValue: string;
+  ctaHtml: string;
+} {
+  if (opts.meetingType === 'virtual') {
+    if (opts.meetLink) {
+      return {
+        whereValue: 'Online video meeting',
+        ctaHtml: `${emailButton(opts.meetLink, 'Join the meeting')}${linkFallback(opts.meetLink)}`,
+      };
+    }
+    return { whereValue: 'Online — the meeting link will follow', ctaHtml: '' };
+  }
+  return { whereValue: escapeHtml(opts.location || 'Location to be confirmed'), ctaHtml: '' };
+}
+
+/** Location/link line shared by the invitation + update templates (text). */
+function eventWhereText(opts: { meetingType: 'physical' | 'virtual'; location?: string; meetLink?: string }): string {
+  if (opts.meetingType === 'virtual') {
+    return opts.meetLink ? `Join: ${opts.meetLink}` : 'Where: Virtual — the meeting link will follow.';
+  }
+  return `Where: ${opts.location || 'Location to be confirmed'}`;
+}
+
+function renderEventInvitationHtml(opts: {
+  eventTitle: string;
+  whenText: string;
+  meetingType: 'physical' | 'virtual';
+  location?: string;
+  meetLink?: string;
+  organizerName?: string;
+}): string {
+  const organizer = opts.organizerName
+    ? `${escapeHtml(opts.organizerName)} has invited you to an event.`
+    : `You've been invited to an event.`;
+  const venue = eventVenue(opts);
+  const body = `
+    ${eyebrow('Event invitation')}
+    <h1 style="margin:0 0 12px;font-size:22px;line-height:1.3;color:#0f172a;">${escapeHtml(opts.eventTitle)}</h1>
+    <p style="margin:0 0 18px;color:#475569;">${organizer}</p>
+    ${infoPanel([
+      ['When', escapeHtml(opts.whenText)],
+      ['Where', venue.whereValue],
+    ])}
+    ${venue.ctaHtml}
+  `;
+  return emailShell({
+    title: `Invitation: ${opts.eventTitle}`,
+    preheader: `${opts.eventTitle} · ${opts.whenText}`,
+    bodyHtml: body,
+  });
+}
+
+function renderEventInvitationText(opts: {
+  eventTitle: string;
+  whenText: string;
+  meetingType: 'physical' | 'virtual';
+  location?: string;
+  meetLink?: string;
+  organizerName?: string;
+}): string {
+  return [
+    opts.eventTitle,
+    ``,
+    opts.organizerName ? `${opts.organizerName} has invited you to an event.` : `You've been invited to an event.`,
+    ``,
+    `When: ${opts.whenText}`,
+    eventWhereText(opts),
+  ].join('\n');
+}
+
+function renderEventUpdateHtml(opts: {
+  eventTitle: string;
+  whenText: string;
+  changesText: string;
+  meetingType: 'physical' | 'virtual';
+  location?: string;
+  meetLink?: string;
+}): string {
+  const venue = eventVenue(opts);
+  const body = `
+    ${eyebrow('Event updated', '#d97706')}
+    <h1 style="margin:0 0 14px;font-size:22px;line-height:1.3;color:#0f172a;">${escapeHtml(opts.eventTitle)}</h1>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;margin:0 0 4px;">
+      <tr><td style="padding:12px 16px;color:#92400e;font-size:14px;line-height:1.5;">${escapeHtml(opts.changesText)}</td></tr>
+    </table>
+    ${infoPanel([
+      ['When', escapeHtml(opts.whenText)],
+      ['Where', venue.whereValue],
+    ])}
+    ${venue.ctaHtml}
+  `;
+  return emailShell({
+    title: `Updated: ${opts.eventTitle}`,
+    preheader: `${opts.eventTitle} was updated · ${opts.whenText}`,
+    bodyHtml: body,
+  });
+}
+
+function renderEventUpdateText(opts: {
+  eventTitle: string;
+  whenText: string;
+  changesText: string;
+  meetingType: 'physical' | 'virtual';
+  location?: string;
+  meetLink?: string;
+}): string {
+  return [
+    `${opts.eventTitle} — updated`,
+    ``,
+    opts.changesText,
+    ``,
+    `When: ${opts.whenText}`,
+    eventWhereText(opts),
+  ].join('\n');
+}
+
+// Human-readable label for a camelCase form field key. A few keys get explicit
+// overrides; the rest are de-camelCased ("employmentPhone" → "Employment Phone").
+function humanizeFieldKey(k: string): string {
+  const overrides: Record<string, string> = {
+    sin: 'SIN (Social Insurance Number)',
+    vehicleOfInterest: 'Vehicle Of Interest',
+    preferredContact: 'Preferred Contact',
+  };
+  if (overrides[k]) return overrides[k];
+  return k.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
+}
+
+/** Ordered [label, value] rows for a finance application: contact → vehicle → all other fields. */
+function financeApplicationRows(opts: {
+  applicantName: string;
+  applicantEmail: string;
+  applicantPhone: string;
+  vehicleOfInterest?: string;
+  fields: Record<string, unknown>;
+}): [string, string][] {
+  const rows: [string, string][] = [
+    ['Name', opts.applicantName],
+    ['Email', opts.applicantEmail],
+    ['Phone', opts.applicantPhone],
+  ];
+  if (opts.vehicleOfInterest) rows.push(['Vehicle Of Interest', opts.vehicleOfInterest]);
+  for (const [k, v] of Object.entries(opts.fields ?? {})) {
+    if (k === 'vehicleOfInterest') continue; // already shown above
+    if (v === undefined || v === null || String(v).trim() === '') continue;
+    rows.push([humanizeFieldKey(k), Array.isArray(v) ? v.join(', ') : String(v)]);
+  }
+  return rows.filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '');
+}
+
+function renderFinanceApplicationHtml(opts: {
+  applicantName: string;
+  applicantEmail: string;
+  applicantPhone: string;
+  vehicleOfInterest?: string;
+  fields: Record<string, unknown>;
+}): string {
+  const rows = financeApplicationRows(opts)
+    .map(
+      ([label, value]) =>
+        `<tr><td style="padding:9px 14px;border:1px solid #e2e8f0;color:#64748b;white-space:nowrap;vertical-align:top;font-weight:600;font-size:13px;">${escapeHtml(label)}</td><td style="padding:9px 14px;border:1px solid #e2e8f0;color:#0f172a;font-size:14px;">${escapeHtml(value)}</td></tr>`,
+    )
+    .join('');
+  const body = `
+    ${eyebrow('New submission')}
+    <h1 style="margin:0 0 6px;font-size:22px;line-height:1.3;color:#0f172a;">New Finance Application</h1>
+    <p style="margin:0 0 16px;color:#475569;">Submitted via the website finance application form.</p>
+    <table role="presentation" style="border-collapse:collapse;width:100%;">${rows}</table>
+    <p style="font-size:12px;color:#94a3b8;margin:20px 0 0;">This application contains sensitive personal information — handle it per your privacy policy.</p>
+  `;
+  return emailShell({
+    title: `New Finance Application — ${opts.applicantName || opts.applicantEmail}`,
+    preheader: `New finance application from ${opts.applicantName || opts.applicantEmail}.`,
+    bodyHtml: body,
+  });
+}
+
+function renderFinanceApplicationText(opts: {
+  applicantName: string;
+  applicantEmail: string;
+  applicantPhone: string;
+  vehicleOfInterest?: string;
+  fields: Record<string, unknown>;
+}): string {
+  const lines = ['New Finance Application — submitted via website', ''];
+  for (const [label, value] of financeApplicationRows(opts)) {
+    lines.push(`${label}: ${value}`);
+  }
+  return lines.join('\n');
+}
+
+/** Ordered [label, value] rows for a generic website inquiry: contact → vehicle → message → other fields. */
+function websiteInquiryRows(opts: {
+  name: string;
+  email: string;
+  phone: string;
+  vehicleOfInterest?: string;
+  message?: string;
+  fields?: Record<string, unknown>;
+}): [string, string][] {
+  const rows: [string, string][] = [
+    ['Name', opts.name],
+    ['Email', opts.email],
+    ['Phone', opts.phone],
+  ];
+  if (opts.vehicleOfInterest) rows.push(['Vehicle Of Interest', opts.vehicleOfInterest]);
+  if (opts.message && opts.message.trim()) rows.push(['Message', opts.message.trim()]);
+  for (const [k, v] of Object.entries(opts.fields ?? {})) {
+    if (k === 'vehicleOfInterest') continue; // already shown above
+    if (v === undefined || v === null || String(v).trim() === '') continue;
+    rows.push([humanizeFieldKey(k), Array.isArray(v) ? v.join(', ') : String(v)]);
+  }
+  return rows.filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '');
+}
+
+function renderWebsiteInquiryHtml(opts: {
+  formLabel: string;
+  name: string;
+  email: string;
+  phone: string;
+  vehicleOfInterest?: string;
+  message?: string;
+  fields?: Record<string, unknown>;
+}): string {
+  const rows = websiteInquiryRows(opts)
+    .map(
+      ([label, value]) =>
+        `<tr><td style="padding:9px 14px;border:1px solid #e2e8f0;color:#64748b;white-space:nowrap;vertical-align:top;font-weight:600;font-size:13px;">${escapeHtml(label)}</td><td style="padding:9px 14px;border:1px solid #e2e8f0;color:#0f172a;font-size:14px;">${escapeHtml(value)}</td></tr>`,
+    )
+    .join('');
+  const body = `
+    ${eyebrow('New submission')}
+    <h1 style="margin:0 0 6px;font-size:22px;line-height:1.3;color:#0f172a;">New ${escapeHtml(opts.formLabel)}</h1>
+    <p style="margin:0 0 16px;color:#475569;">Submitted via the website ${escapeHtml(opts.formLabel.toLowerCase())} form.</p>
+    <table role="presentation" style="border-collapse:collapse;width:100%;">${rows}</table>
+  `;
+  return emailShell({
+    title: `New ${opts.formLabel} — ${opts.name || opts.email}`,
+    preheader: `New ${opts.formLabel.toLowerCase()} from ${opts.name || opts.email}.`,
+    bodyHtml: body,
+  });
+}
+
+function renderWebsiteInquiryText(opts: {
+  formLabel: string;
+  name: string;
+  email: string;
+  phone: string;
+  vehicleOfInterest?: string;
+  message?: string;
+  fields?: Record<string, unknown>;
+}): string {
+  const lines = [`New ${opts.formLabel} — submitted via website`, ''];
+  for (const [label, value] of websiteInquiryRows(opts)) {
+    lines.push(`${label}: ${value}`);
+  }
+  return lines.join('\n');
 }
 
 function escapeHtml(s: string): string {

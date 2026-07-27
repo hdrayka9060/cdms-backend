@@ -27,15 +27,19 @@ export class DashboardController {
   @RequirePermission(AppModule.DASHBOARD, PermissionAction.VIEW)
   @ApiOperation({
     summary: 'Dashboard KPIs with trend deltas',
-    description: `Six metrics for the current window + the equal-length prior window. KPIs:
-- \`totalVehicles\`: vehicles added in window (or all-time)
-- \`vehiclesSold\`: sales recorded in window
-- \`totalRevenue\`: sum(salePrice − discount) in window
-- \`totalProfit\`: revenue − costPrice in window
-- \`activeLeads\`: leads created in window not closed/archived
-- \`pendingTestDrives\`: scheduled test-drive events in window
+    description: `KPIs for the current window + the equal-length prior window.
+FLOW metrics honour the date range; STOCK metrics reflect current state and
+ignore it (matching the Leads page / upcoming calendar).
+- \`totalVehicles\` (flow): vehicles added in window (createdAt); all-time when no range
+- \`vehiclesSold\` (flow): vehicles sold in window (status=sold, soldDate); all-time when no range
+- \`totalRevenue\` (flow): sum(salePrice − discount) in window
+- \`totalExpenses\` (flow): operational + reconditioning(of sold) + cost(of sold) in window
+- \`totalProfit\` (flow): revenue − totalExpenses in window
+- \`activeLeads\` (stock): leads not closed/archived (current pipeline)
+- \`pendingTestDrives\` (stock): test-drive events with startDateTime > now (excl. cancelled/no-show)
 
-Pass startDate + endDate (YYYY-MM-DD). Omit both for all-time.`,
+Pass startDate + endDate (YYYY-MM-DD). Omit both for all-time. Stock metrics
+return the same value in both blocks, so their trend-delta chip is hidden.`,
   })
   @ApiQuery({ name: 'startDate', required: false, type: String })
   @ApiQuery({ name: 'endDate', required: false, type: String })

@@ -99,6 +99,14 @@ export class CreateCalendarEventDto {
 
   @ApiPropertyOptional() @IsOptional() @IsMongoId() vehicle?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Link this event to a CRM Lead — drives the Buyer Portal appointments + the lead timeline note.',
+  })
+  @IsOptional()
+  @IsMongoId()
+  lead?: string;
+
   @ApiPropertyOptional() @IsOptional() @IsString() location?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() meetLink?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() notes?: string;
@@ -131,6 +139,7 @@ export class UpdateCalendarEventDto {
   @ApiPropertyOptional() @IsOptional() @IsString() customerPhone?: string;
   @ApiPropertyOptional() @IsOptional() @IsEmail() customerEmail?: string;
   @ApiPropertyOptional() @IsOptional() @IsMongoId() vehicle?: string;
+  @ApiPropertyOptional() @IsOptional() @IsMongoId() lead?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() location?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() meetLink?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() notes?: string;

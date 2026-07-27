@@ -4,12 +4,19 @@
  *
  * Prerequisites (do these in the Google Cloud Console first):
  *   1. Create/select a project and enable the "Google Calendar API".
- *   2. OAuth consent screen → add your dealership Google account as a test user.
+ *   2. OAuth consent screen → **set Publishing status to "In production"**
+ *      (click "PUBLISH APP"). This is the PERMANENT FIX: while the app is in
+ *      "Testing" mode, Google EXPIRES the refresh token after 7 DAYS — the #1
+ *      cause of "Meet stopped creating". A published app's refresh token does
+ *      not expire on a timer (only after ~6 months of no use, and the app uses
+ *      it regularly). Do NOT rely on the "add test user" path for production.
  *   3. Credentials → Create OAuth client ID → application type "Desktop app".
  *   4. Put the client id + secret into cdms-backend/.env as
  *      GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET.
  *
  * Then run:  node scripts/get-google-refresh-token.mjs
+ *
+ * (Re-run this any time the token dies — but if step 2 is done, it shouldn't.)
  *
  * It prints an auth URL — open it, sign in with the dealership Google account,
  * grant access, and the script captures the redirect and prints the refresh
