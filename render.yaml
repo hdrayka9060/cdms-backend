@@ -1,0 +1,98 @@
+# Render Blueprint for the CDMS backend (NestJS + MongoDB Atlas).
+# Deploy: push this repo to GitHub, then in Render → New → Blueprint, point at it.
+# Render auto-injects PORT; the app already reads process.env.PORT and binds 0.0.0.0.
+#
+# Secrets (sync: false) are NOT stored here — Render prompts for them in the
+# dashboard on first deploy. Fill each one there.
+services:
+  - type: web
+    name: cdms-backend
+    runtime: node
+    plan: free # free tier cold-starts after ~15 min idle; upgrade for always-on
+    # branch: main            # uncomment/adjust if your default branch differs
+    buildCommand: npm install && npm run build
+    startCommand: npm run start:prod
+    healthCheckPath: /api/v1/website/pages # @Public, no-DB, returns 200
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # ── Frontend origins allowed by CORS (comma-separated, NO trailing slash) ──
+      # Set to your two Netlify URLs once they exist, e.g.
+      #   https://spinauto-admin.netlify.app,https://spinauto.netlify.app
+      - key: ALLOWED_ORIGINS
+        sync: false
+      # Admin app URL used to build invite / password-reset email links.
+      # Set to the ADMIN Netlify site, e.g. https://spinauto-admin.netlify.app
+      - key: FRONTEND_URL
+        sync: false
+      # ── Database ──
+      - key: MONGODB_URI
+        sync: false
+      # ── JWT ──
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      # ── Mail (Gmail SMTP or provider) ──
+      - key: MAIL_HOST
+        sync: false
+      - key: MAIL_PORT
+        sync: false
+      - key: MAIL_USER
+        sync: false
+      - key: MAIL_PASS
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      # ── Google (Meet + Calendar) ──
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_CALENDAR_ID
+        sync: false
+      # ── Facebook (Listings) ──
+      - key: FACEBOOK_APP_ID
+        sync: false
+      - key: FACEBOOK_APP_SECRET
+        sync: false
+      - key: FACEBOOK_CONFIG_ID
+        sync: false
+      - key: FACEBOOK_TOKEN_ENC_KEY
+        sync: false # 64-hex-char AES key — rotating it invalidates stored FB/Ads tokens
+      # ── Google + Meta Ads ──
+      - key: GOOGLE_ADS_DEVELOPER_TOKEN
+        sync: false
+      - key: GOOGLE_ADS_CLIENT_ID
+        sync: false
+      - key: GOOGLE_ADS_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_ADS_LOGIN_CUSTOMER_ID
+        sync: false
+      - key: GOOGLE_ADS_CUSTOMER_ID
+        sync: false
+      # OAuth redirect URIs — set to your deployed ADMIN (Netlify) origin, and
+      # whitelist the same URLs in the Google/Meta app consoles:
+      #   GOOGLE_ADS_REDIRECT_URI=https://spinauto-admin.netlify.app/marketing/connect/google/callback
+      #   META_ADS_REDIRECT_URI=https://spinauto-admin.netlify.app/marketing/connect/meta/callback
+      - key: GOOGLE_ADS_REDIRECT_URI
+        sync: false
+      - key: META_ADS_REDIRECT_URI
+        sync: false
+      # ── Amazon S3 (STRONGLY recommended on Render) ──
+      # Render's disk is EPHEMERAL: files written to ./uploads are lost on every
+      # deploy/restart. Set S3_* so uploaded vehicle images persist. If left
+      # unset the app runs in local-disk mode (uploads vanish on redeploy).
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_PUBLIC_BASE_URL
+        sync: false

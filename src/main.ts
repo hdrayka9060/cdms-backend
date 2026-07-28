@@ -22,9 +22,14 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const port = configService.get<number>('PORT', 3000);
   const apiPrefix = configService.get<string>('API_PREFIX', 'api');
+  // Comma-separated list of allowed frontend origins. In production set this on
+  // Render to the deployed Netlify URLs, e.g.
+  //   ALLOWED_ORIGINS=https://spinauto-admin.netlify.app,https://spinauto.netlify.app
   const allowedOrigins = configService
     .get<string>('ALLOWED_ORIGINS', 'http://localhost:3000')
-    .split(',');
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
 
   // ── Static assets (uploaded vehicle images, ticket attachments) ──────────
   // Reachable at http://localhost:3000/uploads/vehicles/<filename>.
@@ -128,8 +133,9 @@ All responses follow the standard envelope:
     customSiteTitle: 'CDMS API Documentation',
   });
 
-  await app.listen(port);
-  console.log(`\n🚀 CDMS Backend is running on: http://localhost:${port}`);
+  // Bind to 0.0.0.0 so cloud hosts (Render, etc.) can route to the container.
+  await app.listen(port, '0.0.0.0');
+  console.log(`\n🚀 CDMS Backend is running on port ${port}`);
   console.log(`📚 API Documentation: http://localhost:${port}/${apiPrefix}/docs`);
   console.log(`🌍 Environment: ${configService.get('NODE_ENV', 'development')}\n`);
 }
