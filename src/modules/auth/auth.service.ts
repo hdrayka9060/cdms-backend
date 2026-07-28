@@ -3,6 +3,7 @@ import {
   Logger,
   UnauthorizedException,
   BadRequestException,
+  ForbiddenException,
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -35,8 +36,17 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDto) {
-    // First user signed up via /auth/register is always assigned the seeded "Admin" role.
-    // (Other staff are created via POST /users by an admin, with an explicit roleId.)
+    // Public self-registration is a ONE-TIME bootstrap: it creates the very
+    // first user (assigned the seeded "Admin" role) and is permanently disabled
+    // thereafter. Without this gate, `/auth/register` (a @Public route) would
+    // let anyone on the internet mint themselves an admin account. All further
+    // staff are created via `POST /users` by an admin with an explicit roleId.
+    if ((await this.usersService.count()) > 0) {
+      throw new ForbiddenException(
+        'Public registration is disabled. Ask an administrator to create your account.',
+      );
+    }
+
     const adminRole = await this.rolesService.findByName('Admin');
     if (!adminRole) {
       throw new ServiceUnavailableException(

@@ -106,6 +106,11 @@ export class UsersService {
     return user;
   }
 
+  /** Count of active (non-deleted) users. Used to gate the first-admin bootstrap. */
+  async count(): Promise<number> {
+    return this.userModel.countDocuments({ isDeleted: false });
+  }
+
   async findByEmail(email: string, includePassword = false): Promise<UserDocument | null> {
     const query = this.userModel
       .findOne({ email: email.toLowerCase(), isDeleted: false })
