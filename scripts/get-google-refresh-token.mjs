@@ -2,8 +2,13 @@
  * One-time helper to mint a Google OAuth2 refresh token for the CDMS Google
  * Meet integration.
  *
+ * The token it mints covers BOTH Google Meet (calendar.events) AND outbound
+ * email (gmail.send via the Gmail API) — the same dealership Google account
+ * powers both, so one token serves GoogleMeetService and MailService.
+ *
  * Prerequisites (do these in the Google Cloud Console first):
- *   1. Create/select a project and enable the "Google Calendar API".
+ *   1. Create/select a project and enable BOTH the "Google Calendar API" and
+ *      the "Gmail API".
  *   2. OAuth consent screen → **set Publishing status to "In production"**
  *      (click "PUBLISH APP"). This is the PERMANENT FIX: while the app is in
  *      "Testing" mode, Google EXPIRES the refresh token after 7 DAYS — the #1
@@ -33,7 +38,10 @@ import { auth as googleAuth } from '@googleapis/calendar';
 
 const PORT = 53682;
 const REDIRECT = `http://localhost:${PORT}`;
-const SCOPES = ['https://www.googleapis.com/auth/calendar.events'];
+const SCOPES = [
+  'https://www.googleapis.com/auth/calendar.events', // Google Meet event links
+  'https://www.googleapis.com/auth/gmail.send', // outbound mail via Gmail API
+];
 
 function readEnvFile() {
   const envPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.env');

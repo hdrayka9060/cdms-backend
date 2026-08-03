@@ -1,6 +1,8 @@
 import { Injectable, Logger, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
+import MailComposer from 'nodemailer/lib/mail-composer';
+import { auth as googleAuth, gmail as googleGmail, type gmail_v1 } from '@googleapis/gmail';
 
 /**
  * Thrown when `send({ throwOnFailure: true })` was requested AND the SMTP
@@ -37,47 +39,125 @@ export class MailDeliveryError extends ServiceUnavailableException {
 export class MailService implements OnModuleInit {
   private readonly logger = new Logger(MailService.name);
   private transporter: nodemailer.Transporter | null = null;
+  private gmail: gmail_v1.Gmail | null = null;
+  /**
+   * Which delivery path is active:
+   *  • `gmail` — Gmail REST API over HTTPS (bypasses hosts that block SMTP,
+   *    e.g. Render). Reuses the GOOGLE_* OAuth creds; token needs the
+   *    `gmail.send` scope.
+   *  • `smtp`  — classic Nodemailer SMTP.
+   *  • `dev`   — no real creds; links are logged to console, never sent.
+   */
+  private transport: 'gmail' | 'smtp' | 'dev' = 'dev';
   private fromAddress = 'CDMS <noreply@cdms.com>';
-  private devMode = true;
 
   constructor(private readonly config: ConfigService) {}
 
   onModuleInit() {
+    // MAIL_FROM sometimes arrives wrapped in literal quotes (e.g. Render env
+    // values like `"SpinAuto <x@gmail.com>"`) — strip them or the address
+    // becomes a malformed From header.
+    this.fromAddress = this.stripWrappingQuotes(
+      this.config.get<string>('MAIL_FROM') ?? this.fromAddress,
+    );
+
+    // `MAIL_TRANSPORT` lets an operator force a path; otherwise we auto-select
+    // Gmail-API (preferred — works where SMTP is blocked) → SMTP → dev.
+    const forced = (this.config.get<string>('MAIL_TRANSPORT') ?? '').trim().toLowerCase();
+
+    if (forced !== 'smtp' && this.initGmailApi()) return;
+    if (forced !== 'gmail' && forced !== 'gmail-api' && this.initSmtp()) return;
+
+    this.transport = 'dev';
+    this.logger.warn(
+      'No usable mail transport configured (Gmail-API needs GOOGLE_* creds with the ' +
+        'gmail.send scope; SMTP needs MAIL_HOST/MAIL_USER/MAIL_PASS) — running in dev mode ' +
+        '(links logged to console, not sent).',
+    );
+  }
+
+  /**
+   * Gmail REST API transport. Reuses the same OAuth2 creds as GoogleMeet
+   * (single dealership Google account). Sends over HTTPS, so it works on hosts
+   * that block outbound SMTP (Render). Returns true when active.
+   */
+  private initGmailApi(): boolean {
+    const clientId = this.config.get<string>('GOOGLE_CLIENT_ID');
+    const clientSecret = this.config.get<string>('GOOGLE_CLIENT_SECRET');
+    const refreshToken = this.config.get<string>('GOOGLE_REFRESH_TOKEN');
+
+    const credsLookReal =
+      !!clientId &&
+      !!clientSecret &&
+      !!refreshToken &&
+      clientId !== 'your_google_client_id' &&
+      clientSecret !== 'your_google_client_secret' &&
+      refreshToken !== 'your_google_refresh_token';
+    if (!credsLookReal) return false;
+
+    try {
+      const oauth2 = new googleAuth.OAuth2(clientId, clientSecret);
+      oauth2.setCredentials({ refresh_token: refreshToken });
+      this.gmail = googleGmail({ version: 'v1', auth: oauth2 });
+      this.transport = 'gmail';
+
+      // Non-blocking token check (mirrors GoogleMeet / SMTP.verify). Confirms
+      // the refresh token is valid; a missing `gmail.send` scope only surfaces
+      // on the first real send (getProfile would need a read scope we don't ask
+      // for), so we call that out in the failure hint.
+      oauth2.getAccessToken().then(
+        () => this.logger.log(`📧 Gmail API transport ready (from=${this.fromAddress})`),
+        (err) =>
+          this.logger.warn(
+            `📧 Gmail API token check failed — mail may not send: ${err?.message ?? err}. ` +
+              'If this says invalid_grant, re-mint GOOGLE_REFRESH_TOKEN (with the gmail.send scope).',
+          ),
+      );
+      return true;
+    } catch (err) {
+      this.gmail = null;
+      this.logger.warn(
+        `Gmail API init failed (${err instanceof Error ? err.message : err}) — trying SMTP next.`,
+      );
+      return false;
+    }
+  }
+
+  /** Classic SMTP transport (Nodemailer). Returns true when active. */
+  private initSmtp(): boolean {
     const host = this.config.get<string>('MAIL_HOST');
     const port = Number(this.config.get<string>('MAIL_PORT') ?? 587);
     const user = this.config.get<string>('MAIL_USER');
     const pass = this.config.get<string>('MAIL_PASS');
     const secure = String(this.config.get<string>('MAIL_SECURE') ?? 'false') === 'true';
-    this.fromAddress = this.config.get<string>('MAIL_FROM') ?? this.fromAddress;
 
-    // Treat unset / placeholder creds as "dev mode". `.env` ships with
-    // `your_app_password` as the default which is obviously not real.
     const credsLookReal =
       !!host && !!user && !!pass && pass !== 'your_app_password' && user !== 'your_email@gmail.com';
+    if (!credsLookReal) return false;
 
-    if (!credsLookReal) {
-      this.devMode = true;
-      this.logger.warn(
-        `MAIL_HOST/MAIL_USER/MAIL_PASS not fully configured — running in dev mode (links logged to console, not sent).`,
-      );
-      return;
-    }
-
-    this.devMode = false;
+    this.transport = 'smtp';
     this.transporter = nodemailer.createTransport({
       host,
       port,
       secure,
       auth: { user, pass },
+      // Fail fast instead of hanging ~2 min when the host blocks the SMTP port.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
     });
 
-    // Verify the connection at boot so misconfigurations surface immediately
-    // rather than on the first invite attempt. `verify` returns a promise but
-    // we don't block boot on it.
     this.transporter.verify().then(
       () => this.logger.log(`📧 SMTP transport ready (${user}@${host}:${port})`),
       (err) => this.logger.warn(`📧 SMTP verify failed — invites may not deliver: ${err?.message ?? err}`),
     );
+    return true;
+  }
+
+  private stripWrappingQuotes(v: string): string {
+    const t = v.trim();
+    return (t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))
+      ? t.slice(1, -1).trim()
+      : t;
   }
 
   /**
@@ -257,7 +337,7 @@ export class MailService implements OnModuleInit {
     contextTag: string;
     throwOnFailure?: boolean;
   }): Promise<void> {
-    if (this.devMode || !this.transporter) {
+    if (this.transport === 'dev') {
       // Surface the full link in console so the developer can copy it into
       // the browser instead of waiting for SMTP. The tag makes it easy to
       // grep server logs for ("invite" or "password-reset").
@@ -268,14 +348,19 @@ export class MailService implements OnModuleInit {
     }
 
     try {
-      const info = await this.transporter.sendMail({
-        from: this.fromAddress,
-        to: opts.to,
-        subject: opts.subject,
-        html: opts.html,
-        text: opts.text,
-      });
-      this.logger.log(`📧 mail/${opts.contextTag} sent to=${opts.to} messageId=${info.messageId}`);
+      const messageId =
+        this.transport === 'gmail'
+          ? await this.sendViaGmail(opts)
+          : (
+              await this.transporter!.sendMail({
+                from: this.fromAddress,
+                to: opts.to,
+                subject: opts.subject,
+                html: opts.html,
+                text: opts.text,
+              })
+            ).messageId;
+      this.logger.log(`📧 mail/${opts.contextTag} sent to=${opts.to} messageId=${messageId}`);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.logger.warn(`📧 mail/${opts.contextTag} FAILED to=${opts.to}: ${reason}`);
@@ -285,6 +370,43 @@ export class MailService implements OnModuleInit {
       // Otherwise: swallow. Mail failure on a best-effort path (password
       // reset etc.) must never reject the originating request.
     }
+  }
+
+  /**
+   * Build an RFC-822 MIME message (via Nodemailer's composer, so the same HTML
+   * templates render identically) and hand it to the Gmail API's
+   * `users.messages.send`. Sends as the authenticated dealership account.
+   * Returns the Gmail message id.
+   */
+  private async sendViaGmail(opts: {
+    to: string;
+    subject: string;
+    html: string;
+    text: string;
+  }): Promise<string> {
+    if (!this.gmail) throw new Error('Gmail transport not initialised');
+
+    const mime = await new MailComposer({
+      from: this.fromAddress,
+      to: opts.to,
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text,
+    })
+      .compile()
+      .build();
+
+    const raw = mime
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    const res = await this.gmail.users.messages.send({
+      userId: 'me',
+      requestBody: { raw },
+    });
+    return res.data.id ?? '(no-id)';
   }
 }
 
