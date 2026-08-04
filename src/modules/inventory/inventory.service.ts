@@ -324,6 +324,32 @@ export class InventoryService implements OnModuleInit {
   }
 
   /**
+   * Reorder a vehicle's photos. `orderedPhotos` MUST be a permutation of the
+   * current photos[] (same set, possibly reordered) — we reject any list that
+   * adds, drops, or alters a URL so a stale client can't silently lose images.
+   * The array order IS the display order everywhere the photos are read (admin
+   * gallery, public storefront, buyer portal, Facebook), so persisting the new
+   * order here makes it reflect in all of them.
+   */
+  async reorderImages(id: string, orderedPhotos: string[]): Promise<VehicleDocument> {
+    const vehicle = await this.vehicleModel.findOne({ _id: id, isDeleted: false });
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    const current = vehicle.photos ?? [];
+    const sameSet =
+      Array.isArray(orderedPhotos) &&
+      orderedPhotos.length === current.length &&
+      [...orderedPhotos].sort().join(' ') === [...current].sort().join(' ');
+    if (!sameSet) {
+      throw new BadRequestException(
+        'Reorder list must contain exactly the current photos (no additions or removals).',
+      );
+    }
+    vehicle.photos = orderedPhotos;
+    await vehicle.save();
+    return vehicle;
+  }
+
+  /**
    * Record a reconditioning spend on a vehicle (repair/service/parts/etc).
    * Allowed even after the vehicle is sold. Every spend is mirrored into the
    * expense ledger (category 'reconditioning') so it appears in Accounting and

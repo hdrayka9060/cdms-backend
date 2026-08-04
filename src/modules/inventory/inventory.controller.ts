@@ -202,6 +202,28 @@ export class InventoryController {
   }
 
   /**
+   * PATCH /api/v1/inventory/:id/images/order
+   * Body: { photos: string[] }  — the full photos[] in the desired order.
+   */
+  @Patch(':id/images/order')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reorder vehicle images',
+    description:
+      "Sets the vehicle's photos[] to the given order. The body must contain exactly the current photos (a permutation) — no additions or removals. Array order is the display order used by the admin gallery, storefront, buyer portal, and Facebook, so the new order reflects everywhere.",
+  })
+  @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
+  @ApiBody({
+    description: 'Full ordered photos list',
+    schema: { type: 'object', properties: { photos: { type: 'array', items: { type: 'string' } } } },
+  })
+  async reorderImages(@Param('id') id: string, @Body() body: { photos: string[] }) {
+    const vehicle = await this.inventoryService.reorderImages(id, body?.photos ?? []);
+    return { message: 'Image order updated', data: vehicle };
+  }
+
+  /**
    * POST /api/v1/inventory/:id/spends
    */
   @Post(':id/spends')
