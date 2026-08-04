@@ -165,11 +165,22 @@ export class StorageService implements OnModuleInit {
     const key = `${prefix}/${filename}`;
 
     if (this._enabled && this.driver === 'gcs' && this.gcsBucket) {
-      await this.gcsBucket.file(key).save(buffer, {
-        contentType: mimeType || 'application/octet-stream',
-        metadata: { cacheControl: 'public, max-age=31536000' },
-        resumable: false,
-      });
+      try {
+        await this.gcsBucket.file(key).save(buffer, {
+          contentType: mimeType || 'application/octet-stream',
+          metadata: { cacheControl: 'public, max-age=31536000' },
+          resumable: false,
+        });
+      } catch (err) {
+        this.logger.error(
+          `GCS upload failed (bucket=${this.bucket} key=${key}): ` +
+            `${err instanceof Error ? err.message : err}. ` +
+            'Common cause: the service account lacks storage.objects.create ' +
+            '(grant "Storage Object User" on the bucket), or GCS_KEY_FILE/' +
+            'GCS_CREDENTIALS_JSON is wrong, or GCS_BUCKET name is incorrect.',
+        );
+        throw err;
+      }
       return `${this.publicBase}/${key}`;
     }
 

@@ -18,6 +18,12 @@ import { Lead, LeadDocument, LeadStatus } from './schemas/lead.schema';
  *      has these refs as plain strings. That broke filter matches in the
  *      sibling-archive and inverse-transition cascades. Schema is now fixed
  *      to `Schema.Types.ObjectId`, but existing rows need a one-time rewrite.
+ *   3. Drop the stale unique (buyer, vehicle) partial index. It filtered on
+ *      { isDeleted: false } only, so an ARCHIVED lead still occupied the slot
+ *      and blocked creating a fresh lead for the same buyer×vehicle (E11000)
+ *      before the status-aware Guard 2 could allow it. Uniqueness is now
+ *      guard-enforced only; the index is removed from the schema and dropped
+ *      here for databases created before the change.
  */
 @Injectable()
 export class LeadsMigrator implements OnApplicationBootstrap {
@@ -30,6 +36,40 @@ export class LeadsMigrator implements OnApplicationBootstrap {
   async onApplicationBootstrap(): Promise<void> {
     await this.renameDroppedToArchived();
     await this.castStringRefsToObjectId();
+    await this.dropStaleBuyerVehicleUniqueIndex();
+  }
+
+  /**
+   * Drop the legacy unique (buyer, vehicle) partial index if present. Its
+   * partialFilterExpression was { isDeleted: false }, which is NOT status-aware:
+   * an archived lead (isDeleted: false) kept holding the buyer×vehicle slot, so
+   * a new lead for the same pair failed with a duplicate-key error even though
+   * Guard 2 in LeadsService.create would have allowed it. Uniqueness is now
+   * enforced solely by that guard. Matches by key pattern so it works whatever
+   * the auto-generated index name is. No-op once the index is gone.
+   */
+  private async dropStaleBuyerVehicleUniqueIndex(): Promise<void> {
+    const collection = this.leadModel.collection;
+    try {
+      const indexes = await collection.indexes();
+      const stale = indexes.find(
+        (ix) =>
+          ix.unique === true &&
+          ix.key &&
+          Object.keys(ix.key).length === 2 &&
+          ix.key.buyer === 1 &&
+          ix.key.vehicle === 1,
+      );
+      if (stale?.name) {
+        await collection.dropIndex(stale.name);
+        this.logger.log(`Dropped stale unique index '${stale.name}' on (buyer, vehicle)`);
+      }
+    } catch (err) {
+      this.logger.error(
+        'Dropping stale (buyer, vehicle) unique index failed',
+        err instanceof Error ? err.stack : err,
+      );
+    }
   }
 
   private async renameDroppedToArchived(): Promise<void> {

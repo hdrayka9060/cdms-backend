@@ -117,7 +117,11 @@ LeadSchema.index({ status: 1, source: 1 });
 LeadSchema.index({ assignedTo: 1 });
 LeadSchema.index({ buyer: 1 });
 LeadSchema.index({ vehicle: 1 });
-LeadSchema.index(
-  { buyer: 1, vehicle: 1 },
-  { unique: true, partialFilterExpression: { isDeleted: false } }
-);
+// NOTE: no DB-level unique (buyer, vehicle) index. Uniqueness is enforced at the
+// application layer by Guard 2 in LeadsService.create, which is *status-aware*:
+// only a non-archived lead holds the buyer×vehicle slot, so archiving a lead
+// releases it for a fresh one (archived is treated as deleted). A partial unique
+// index can't express "status != archived" (partialFilterExpression forbids
+// $ne), and an { isDeleted: false } filter alone wrongly blocks re-creation
+// after archiving — the exact bug this replaces. LeadsMigrator drops the stale
+// buyer_1_vehicle_1 unique index left on older databases.
