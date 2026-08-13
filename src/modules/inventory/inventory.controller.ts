@@ -11,7 +11,7 @@ import {
 import { InventoryService } from './inventory.service';
 import { VinDecodeService } from './vin-decode.service';
 import { StorageService } from '../../common/storage/storage.service';
-import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto, CreateVehicleSpendDto, UpdateVehicleSpendDto } from './dto/vehicle.dto';
+import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto, CreateVehicleSpendDto, UpdateVehicleSpendDto, MarkSoldDto } from './dto/vehicle.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { RequirePermission } from '../../common/decorators/require-permission.decorator';
@@ -72,6 +72,56 @@ export class InventoryController {
   async create(@Body() dto: CreateVehicleDto, @CurrentUser() user: any) {
     const vehicle = await this.inventoryService.create(dto, user._id);
     return { message: 'Vehicle added successfully', data: vehicle };
+  }
+
+  /**
+   * POST /api/v1/inventory/:id/mark-sold
+   *
+   * Mark a vehicle as sold from the Inventory surface. Funnels into the unified
+   * sale flow (AccountingService.createSale): creates the Sale (accounting
+   * ledger), flips the vehicle to sold, archives every other open lead for the
+   * vehicle, links to a CRM buyer when `buyerLeadId` is supplied, and logs the
+   * activity. Cost price is sourced from the vehicle, never the client.
+   */
+  @Post(':id/mark-sold')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
+  @ApiOperation({
+    summary: 'Mark a vehicle as sold',
+    description:
+      'Records a sale for this vehicle via the unified sale flow: writes the Sale ' +
+      '(accounting ledger + P&L), flips the vehicle to sold (soldAt/soldDate), ' +
+      'auto-archives every other open lead for the vehicle, pushes onto a CRM ' +
+      "buyer's purchases[] when buyerLeadId is supplied, and logs the activity. " +
+      '409 if the vehicle already has a sale.',
+  })
+  @ApiParam({ name: 'id', description: 'Vehicle ObjectId' })
+  @ApiResponse({ status: 201, description: 'Vehicle marked as sold' })
+  @ApiResponse({ status: 404, description: 'Vehicle not found' })
+  @ApiResponse({ status: 409, description: 'Vehicle already sold' })
+  async markSold(@Param('id') id: string, @Body() dto: MarkSoldDto, @CurrentUser() user: any) {
+    const actorName = user
+      ? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || undefined
+      : undefined;
+    const actorId = user?._id ? String(user._id) : undefined;
+    const sale = await this.inventoryService.markSold(id, dto, actorName, actorId);
+    return { message: 'Vehicle marked as sold', data: sale };
+  }
+
+  /**
+   * GET /api/v1/inventory/:id/sold-buyer
+   * The buyer behind a sold vehicle (from its closed lead) — or a "Walk-in"
+   * placeholder. Powers the buyer line + "assign buyer" action on Vehicle Details.
+   */
+  @Get(':id/sold-buyer')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.VIEW)
+  @ApiOperation({
+    summary: "Get a sold vehicle's buyer",
+    description: 'Returns { leadId, isWalkIn, buyerId, buyerName, buyerEmail } from the vehicle\'s closed lead, or null.',
+  })
+  @ApiParam({ name: 'id', description: 'Vehicle ObjectId' })
+  async getSoldBuyer(@Param('id') id: string) {
+    const data = await this.inventoryService.getSoldBuyer(id);
+    return { message: 'Sold buyer', data };
   }
 
   /**

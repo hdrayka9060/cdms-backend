@@ -7,14 +7,15 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { Model, FilterQuery, Types, isValidObjectId } from 'mongoose';
 import { parse } from 'csv-parse/sync';
 import { Vehicle, VehicleDocument, VehicleStatus } from './schemas/vehicle.schema';
-import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto } from './dto/vehicle.dto';
+import { CreateVehicleDto, UpdateVehicleDto, VehicleQueryDto, MarkSoldDto } from './dto/vehicle.dto';
 import { PaginatedResult } from '../../common/dto/pagination.dto';
 import { SellerLead, SellerLeadDocument } from '../crm-sellers/schemas/seller-lead.schema';
-import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
+import { Lead, LeadDocument, LeadStatus, LeadSource } from '../leads/schemas/lead.schema';
 import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
 import { CalendarEvent, CalendarEventDocument } from '../calendar/schemas/calendar-event.schema';
 import { CommunicationLog, CommunicationLogDocument } from '../communication/schemas/communication-log.schema';
 import { AccountingService } from '../accounting/accounting.service';
+import { CrmBuyersService } from '../crm-buyers/crm-buyers.service';
 import { ActivityService } from '../activity/activity.service';
 import { VinDecodeService, DecodedVehicleFields } from './vin-decode.service';
 import { StorageService } from '../../common/storage/storage.service';
@@ -55,6 +56,7 @@ export class InventoryService implements OnModuleInit {
     // forwardRef: AccountingModule already imports the Vehicle schema, so DI
     // would deadlock without it.
     @Inject(forwardRef(() => AccountingService)) private accountingService: AccountingService,
+    private readonly crmBuyersService: CrmBuyersService,
     private readonly activity: ActivityService,
     private readonly vinDecode: VinDecodeService,
     private readonly storage: StorageService,
@@ -114,6 +116,115 @@ export class InventoryService implements OnModuleInit {
       meta: { price: saved.price, status: saved.status },
     });
     return saved;
+  }
+
+  /**
+   * Mark a vehicle as sold from the Inventory surface. A thin, Inventory:edit-gated
+   * wrapper over the unified `AccountingService.createSale` flow, so this reuses the
+   * exact same integrations as Accounting "Record Sale" and Lead "Close":
+   *   - writes the Sale (accounting ledger + P&L),
+   *   - flips this vehicle → sold (+ soldAt / soldDate),
+   *   - archives every other open lead for this vehicle,
+   *   - pushes onto a CRM buyer's purchases[] when `buyerLeadId` is supplied,
+   *   - logs the "sale-recorded" activity.
+   * `costPrice` is sourced from the vehicle here (never trusted from the client) —
+   * the same single-source-of-truth contract the other two entry points use.
+   */
+  async markSold(id: string, dto: MarkSoldDto, actorName?: string, actorId?: string): Promise<any> {
+    if (!isValidObjectId(id)) throw new BadRequestException('Invalid vehicle id');
+    const vehicle = await this.vehicleModel.findOne({ _id: id, isDeleted: false }).lean();
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    if ((vehicle as any).status === VehicleStatus.SOLD) {
+      throw new ConflictException('This vehicle is already marked as sold.');
+    }
+
+    // Resolve the CRM buyer BEFORE the sale so a duplicate-email failure aborts
+    // the whole operation (no orphan Sale). Buyer is OPTIONAL:
+    //   - `buyerLeadId` supplied → user picked an existing CRM buyer; use as-is.
+    //   - else an email was entered → walk-in buyer: create them in CRM, which
+    //     rejects (409) on a duplicate email (CrmBuyersService.create →
+    //     assertEmailUnique). Single source of truth for buyer creation.
+    //   - else no email → no CRM buyer; record a walk-in sale with placeholders
+    //     (the Sale schema requires buyerName/buyerEmail).
+    const buyerName = (dto.buyerName ?? '').trim();
+    const buyerEmail = (dto.buyerEmail ?? '').trim();
+    let buyerLeadId = dto.buyerLeadId;
+    if (!buyerLeadId && buyerEmail) {
+      const phone = (dto.buyerPhone ?? '').trim();
+      if (!phone) {
+        throw new BadRequestException('Buyer phone is required to add a new buyer to CRM.');
+      }
+      const buyer = await this.crmBuyersService.create({
+        buyerName: buyerName || 'Walk-in',
+        buyerEmail,
+        buyerPhone: phone,
+      } as any);
+      buyerLeadId = String((buyer as any)._id ?? (buyer as any).id);
+    }
+
+    // Create a CLOSED walk-in lead that represents this sale. It's the handle
+    // for reversing the sale: archiving this lead un-sells the car and removes
+    // the ledger entry (LeadsService.update cascade, keyed off the vehicle).
+    // Saved as NEW; createSale (leadId) closes it with a timeline entry and
+    // archives any other open leads on the vehicle.
+    const lead = await new this.leadModel({
+      vehicle: new Types.ObjectId(id),
+      buyer: buyerLeadId && isValidObjectId(buyerLeadId) ? new Types.ObjectId(buyerLeadId) : undefined,
+      source: LeadSource.WALK_IN,
+      status: LeadStatus.NEW,
+      assignedTo: actorId && isValidObjectId(actorId) ? new Types.ObjectId(actorId) : undefined,
+      timeline: [{ date: new Date(), action: 'Lead created — vehicle marked as sold', by: actorName ?? 'System' }],
+    }).save();
+
+    // Delegate to the single source of truth. Its own guard also rejects a
+    // duplicate (409) if a non-deleted Sale already exists for this vehicle.
+    return this.accountingService.createSale({
+      vehicleId: id,
+      vehicleTitle: (vehicle as any).title,
+      buyerName: buyerName || 'Walk-in',
+      buyerEmail: buyerEmail || '—',
+      salePrice: dto.salePrice,
+      costPrice: (vehicle as any).costPrice ?? 0, // server-sourced, tamper-proof
+      discount: dto.discount ?? 0,
+      amountPaid: dto.amountPaid,
+      saleDate: dto.saleDate,
+      paymentMethod: dto.paymentMethod ?? 'cash',
+      paymentStatus: dto.paymentStatus ?? 'paid',
+      notes: dto.notes,
+      buyerLeadId,
+      leadId: String(lead._id),
+      actorName,
+    });
+  }
+
+  /**
+   * The buyer behind a sold vehicle — read from the vehicle's CLOSED lead (the
+   * sale's handle). Returns { leadId, isWalkIn, buyerId, buyerName, buyerEmail }
+   * so Vehicle Details can show the buyer (or "Walk-in") and assign one later.
+   * Null when the vehicle has no closed lead.
+   */
+  async getSoldBuyer(id: string): Promise<any> {
+    if (!isValidObjectId(id)) throw new BadRequestException('Invalid vehicle id');
+    const lead = await this.leadModel
+      .findOne({ vehicle: new Types.ObjectId(id), status: LeadStatus.CLOSED, isDeleted: false })
+      .sort({ updatedAt: -1 })
+      .select('buyer')
+      .lean();
+    if (!lead) return null;
+    let buyer: any = null;
+    if ((lead as any).buyer) {
+      buyer = await this.buyerLeadModel
+        .findOne({ _id: (lead as any).buyer })
+        .select('buyerName buyerEmail')
+        .lean();
+    }
+    return {
+      leadId: String((lead as any)._id),
+      isWalkIn: !buyer,
+      buyerId: buyer ? String(buyer._id) : null,
+      buyerName: buyer?.buyerName ?? 'Walk-in',
+      buyerEmail: buyer?.buyerEmail ?? null,
+    };
   }
 
   private async generateUniqueVehicleNumber(): Promise<string> {

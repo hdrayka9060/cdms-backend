@@ -523,6 +523,48 @@ export class AccountingService implements OnModuleInit {
   }
 
   /**
+   * Attach a buyer to the existing (non-deleted) Sale for a vehicle — used when
+   * a buyer is assigned to an already-sold walk-in lead. Updates the Sale's
+   * buyer name/email and pushes the purchase onto the buyer's purchases[]
+   * (stage → purchased), mirroring createSale side-effect 2. Best-effort / no-op
+   * when there's no sale.
+   */
+  async attachBuyerToSale(
+    vehicleId: string,
+    buyer: { buyerLeadId?: string; buyerName: string; buyerEmail?: string },
+  ): Promise<void> {
+    if (!isValidObjectId(vehicleId)) return;
+    const sale = await this.saleModel.findOne({ vehicleId: String(vehicleId), isDeleted: false });
+    if (!sale) return;
+
+    sale.buyerName = buyer.buyerName;
+    if (buyer.buyerEmail) sale.buyerEmail = buyer.buyerEmail;
+    await sale.save();
+
+    if (buyer.buyerLeadId && isValidObjectId(buyer.buyerLeadId)) {
+      const net = Math.max(0, (Number(sale.salePrice) || 0) - (Number(sale.discount) || 0));
+      await this.buyerModel.updateOne(
+        { _id: new Types.ObjectId(buyer.buyerLeadId), isDeleted: false },
+        {
+          $set: { stage: 'purchased' },
+          $push: {
+            purchases: {
+              at: new Date(),
+              vehicle: new Types.ObjectId(vehicleId),
+              vehicleTitle: sale.vehicleTitle,
+              soldAt: net,
+              soldDate: sale.saleDate,
+              paymentMethod: sale.paymentMethod,
+              paymentStatus: sale.paymentStatus,
+              saleId: sale._id,
+            },
+          },
+        },
+      );
+    }
+  }
+
+  /**
    * Flatten every non-deleted vehicle's reconditioning spends into a single
    * ledger-style list for the Accounting page.
    *

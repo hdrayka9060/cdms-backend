@@ -9,8 +9,18 @@ const PAYMENT_METHODS = ['cash', 'finance', 'bhph', 'trade_in'] as const;
 const PAYMENT_STATUSES = ['paid', 'partial', 'pending'] as const;
 
 export class CreateLeadDto {
-  @ApiProperty({ description: 'BuyerLead ObjectId' })
-  @IsNotEmpty() @IsMongoId() buyer: string;
+  // Optional: omit for a walk-in lead (no buyer), or supply newBuyer* to create
+  // a fresh CRM buyer inline (deduped by email). Providing an existing id skips
+  // creation. All three (buyer / newBuyer / none) are valid.
+  @ApiPropertyOptional({ description: 'Existing BuyerLead ObjectId. Omit for walk-in or to create a new buyer.' })
+  @IsOptional() @IsMongoId() buyer?: string;
+
+  @ApiPropertyOptional({ description: 'New buyer name — create a CRM buyer inline (with newBuyerEmail).' })
+  @IsOptional() @IsString() newBuyerName?: string;
+  @ApiPropertyOptional({ description: 'New buyer email — triggers inline CRM buyer creation (deduped; 409 if it exists).' })
+  @IsOptional() @IsString() newBuyerEmail?: string;
+  @ApiPropertyOptional({ description: 'New buyer phone — required when creating a new buyer.' })
+  @IsOptional() @IsString() newBuyerPhone?: string;
 
   @ApiProperty({ description: 'Vehicle ObjectId' })
   @IsNotEmpty() @IsMongoId() vehicle: string;
@@ -60,6 +70,19 @@ export class UpdateLeadDto {
 
   @ApiPropertyOptional({ enum: LeadSource })
   @IsOptional() @IsEnum(LeadSource) source?: LeadSource;
+}
+
+/** Assign a buyer to an existing (walk-in) lead — pick an existing CRM buyer
+ *  or create a new one inline (deduped by email). */
+export class AssignBuyerDto {
+  @ApiPropertyOptional({ description: 'Existing BuyerLead ObjectId to link.' })
+  @IsOptional() @IsMongoId() buyerLeadId?: string;
+  @ApiPropertyOptional({ description: 'New buyer name (with newBuyerEmail) to create + link.' })
+  @IsOptional() @IsString() newBuyerName?: string;
+  @ApiPropertyOptional({ description: 'New buyer email — deduped; 409 if it already exists.' })
+  @IsOptional() @IsString() newBuyerEmail?: string;
+  @ApiPropertyOptional({ description: 'New buyer phone — required when creating a new buyer.' })
+  @IsOptional() @IsString() newBuyerPhone?: string;
 }
 
 export class LeadBookTestDriveDto {

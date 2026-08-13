@@ -100,6 +100,37 @@ export class UpdateVehicleSpendDto {
   @ApiPropertyOptional({ description: 'ISO date of the spend.' }) @IsOptional() @IsString() date?: string;
 }
 
+/**
+ * Body for POST /inventory/:id/mark-sold. Mirrors the sale-capture fields the
+ * Accounting "Record Sale" and Lead "Close" flows collect. `costPrice` is
+ * intentionally absent — it is sourced server-side from the vehicle (single
+ * source of truth, tamper-proof), never accepted from the client.
+ */
+export class MarkSoldDto {
+  @ApiPropertyOptional({ example: 'Jane Buyer', description: 'Buyer full name. Optional — omit for a walk-in sale.' })
+  @IsOptional() @IsString() buyerName?: string;
+  @ApiPropertyOptional({ example: 'jane@example.com', description: 'Buyer email. Optional; when provided (and no buyerLeadId) a CRM buyer is created/deduped.' })
+  @IsOptional() @IsString() buyerEmail?: string;
+  @ApiPropertyOptional({ description: 'Buyer phone. Required only when creating a new CRM buyer (email given, no buyerLeadId).' })
+  @IsOptional() @IsString() buyerPhone?: string;
+  @ApiProperty({ example: 32000, description: 'Sold-at price (what the buyer actually paid).' })
+  @IsNumber() @Min(0) salePrice: number;
+  @ApiPropertyOptional({ default: 0, description: 'Absolute discount in dollars (not a percent).' })
+  @IsOptional() @IsNumber() @Min(0) discount?: number;
+  @ApiPropertyOptional({ description: 'Amount paid so far. Defaults from paymentStatus when omitted.' })
+  @IsOptional() @IsNumber() @Min(0) amountPaid?: number;
+  @ApiProperty({ example: '2026-08-13', description: 'ISO sale date (YYYY-MM-DD).' })
+  @IsNotEmpty() @IsString() saleDate: string;
+  @ApiPropertyOptional({ enum: ['cash', 'finance', 'bhph', 'trade_in'], default: 'cash' })
+  @IsOptional() @IsString() paymentMethod?: string;
+  @ApiPropertyOptional({ enum: ['paid', 'partial', 'pending'], default: 'paid' })
+  @IsOptional() @IsString() paymentStatus?: string;
+  @ApiPropertyOptional({ description: 'Optional CRM Buyer ObjectId — links the sale to buyer.purchases[].' })
+  @IsOptional() @IsString() buyerLeadId?: string;
+  @ApiPropertyOptional({ description: 'Free-text sale notes.' })
+  @IsOptional() @IsString() notes?: string;
+}
+
 export class VehicleQueryDto extends PaginationDto {
   // String (not @IsEnum) so the storefront/admin can pass the 'available'
   // sentinel meaning "no status" (status=''), which findAll translates.

@@ -7,6 +7,7 @@ import { Lead, LeadSchema } from './schemas/lead.schema';
 import { Vehicle, VehicleSchema } from '../inventory/schemas/vehicle.schema';
 import { BuyerLead, BuyerLeadSchema } from '../crm-buyers/schemas/buyer-lead.schema';
 import { AccountingModule } from '../accounting/accounting.module';
+import { CrmBuyersModule } from '../crm-buyers/crm-buyers.module';
 
 @Module({
   imports: [
@@ -22,6 +23,9 @@ import { AccountingModule } from '../accounting/accounting.module';
     // forwardRef: AccountingModule imports Inventory's Vehicle schema and
     // Inventory's module is also imported by other modules — keep this lazy.
     forwardRef(() => AccountingModule),
+    // Reused to create-or-dedup a CRM buyer when a new buyer is entered while
+    // creating a lead / assigning a buyer to a walk-in. Plain (non-circular).
+    CrmBuyersModule,
   ],
   controllers: [LeadsController],
   providers: [LeadsService, LeadsMigrator],

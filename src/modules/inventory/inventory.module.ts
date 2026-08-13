@@ -11,6 +11,7 @@ import { BuyerLead, BuyerLeadSchema } from '../crm-buyers/schemas/buyer-lead.sch
 import { CalendarEvent, CalendarEventSchema } from '../calendar/schemas/calendar-event.schema';
 import { CommunicationLog, CommunicationLogSchema } from '../communication/schemas/communication-log.schema';
 import { AccountingModule } from '../accounting/accounting.module';
+import { CrmBuyersModule } from '../crm-buyers/crm-buyers.module';
 
 @Module({
   imports: [
@@ -32,6 +33,10 @@ import { AccountingModule } from '../accounting/accounting.module';
     // forwardRef: AccountingModule itself imports the Vehicle schema, so this
     // would otherwise deadlock at module-resolution time.
     forwardRef(() => AccountingModule),
+    // Reused by markSold to create-or-dedup the CRM buyer when a walk-in buyer
+    // is entered manually. CrmBuyersModule imports no InventoryModule, so this
+    // is a plain (non-circular) import.
+    CrmBuyersModule,
     MulterModule.register({ dest: './uploads/vehicles' }),
   ],
   controllers: [InventoryController],

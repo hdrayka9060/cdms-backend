@@ -22,6 +22,7 @@ import { LeadsService } from './leads.service';
 import {
   AddLogEntryDto,
   AddTimelineEntryDto,
+  AssignBuyerDto,
   CloseLeadDto,
   CreateLeadDto,
   LeadBookTestDriveDto,
@@ -97,6 +98,25 @@ export class LeadsController {
     const actorName = formatActor(user);
     const lead = await this.service.update(id, dto, actorName);
     return { message: 'Lead updated', data: lead };
+  }
+
+  @Post(':id/assign-buyer')
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
+  @ApiOperation({
+    summary: 'Assign a buyer to a walk-in lead',
+    description:
+      'Links an existing CRM buyer (buyerLeadId) or creates a new one inline ' +
+      '(newBuyer* — deduped by email, 409 if it exists) to a buyer-less lead. ' +
+      'If the lead is already closed (a completed walk-in sale) the Sale row + the ' +
+      "buyer's purchases[] are updated too. 409 if the lead already has a buyer.",
+  })
+  @ApiParam({ name: 'id', description: 'Lead ObjectId' })
+  @ApiResponse({ status: 201, description: 'Buyer assigned' })
+  @ApiResponse({ status: 409, description: 'Lead already has a buyer, or duplicate buyer email' })
+  async assignBuyer(@Param('id') id: string, @Body() dto: AssignBuyerDto, @CurrentUser() user: any) {
+    const actorName = formatActor(user);
+    const lead = await this.service.assignBuyer(id, dto, actorName);
+    return { message: 'Buyer assigned', data: lead };
   }
 
   @Post(':id/timeline')

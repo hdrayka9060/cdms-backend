@@ -45,8 +45,11 @@ export class Lead {
   // a Mixed schema type — strings stay strings on save, and any subsequent
   // `{ vehicle: new Types.ObjectId(id) }` filter matches zero documents.
   // That bug masked the entire sibling-archive cascade for months.
-  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'BuyerLead', required: true })
-  buyer: Types.ObjectId;
+  // Optional: walk-in leads have no buyer yet (a buyer can be assigned later).
+  // When absent the lead displays as a "Walk-in". Guard 2 (buyer×vehicle
+  // uniqueness) is skipped for buyer-less leads.
+  @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'BuyerLead', required: false })
+  buyer?: Types.ObjectId;
 
   @Prop({ type: MongooseSchema.Types.ObjectId, ref: 'Vehicle', required: true })
   vehicle: Types.ObjectId;

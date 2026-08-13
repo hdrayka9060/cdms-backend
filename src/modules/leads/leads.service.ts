@@ -7,6 +7,7 @@ import { Lead, LeadDocument, LeadStatus } from './schemas/lead.schema';
 import {
   AddLogEntryDto,
   AddTimelineEntryDto,
+  AssignBuyerDto,
   CloseLeadDto,
   CreateLeadDto,
   LeadBookTestDriveDto,
@@ -18,6 +19,7 @@ import { PaginatedResult } from '../../common/dto/pagination.dto';
 import { Vehicle, VehicleDocument, VehicleStatus } from '../inventory/schemas/vehicle.schema';
 import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
 import { AccountingService } from '../accounting/accounting.service';
+import { CrmBuyersService } from '../crm-buyers/crm-buyers.service';
 import { ActivityService } from '../activity/activity.service';
 
 /**
@@ -45,8 +47,38 @@ export class LeadsService {
     @InjectModel(Vehicle.name) private readonly vehicleModel: Model<VehicleDocument>,
     @InjectModel(BuyerLead.name) private readonly buyerModel: Model<BuyerLeadDocument>,
     @Inject(forwardRef(() => AccountingService)) private readonly accountingService: AccountingService,
+    private readonly crmBuyersService: CrmBuyersService,
     private readonly activity: ActivityService,
   ) {}
+
+  /**
+   * Resolve a buyer for a lead from one of three inputs:
+   *   - `buyerId`  → an existing CRM buyer, used as-is.
+   *   - `newBuyer` (email present) → create a CRM buyer inline via
+   *     CrmBuyersService.create, which rejects (409) a duplicate email. Phone
+   *     required. Single source of truth for buyer creation.
+   *   - neither    → walk-in; returns null (no buyer).
+   */
+  private async resolveBuyerId(input: {
+    buyerId?: string;
+    newBuyerName?: string;
+    newBuyerEmail?: string;
+    newBuyerPhone?: string;
+  }): Promise<string | null> {
+    if (input.buyerId && isValidObjectId(input.buyerId)) return input.buyerId;
+    const email = (input.newBuyerEmail ?? '').trim();
+    if (!email) return null; // walk-in
+    const phone = (input.newBuyerPhone ?? '').trim();
+    if (!phone) {
+      throw new BadRequestException('Buyer phone is required to add a new buyer.');
+    }
+    const buyer = await this.crmBuyersService.create({
+      buyerName: (input.newBuyerName ?? '').trim() || 'Walk-in',
+      buyerEmail: email,
+      buyerPhone: phone,
+    } as any);
+    return String((buyer as any)._id ?? (buyer as any).id);
+  }
 
   /**
    * Hydrate log[].vehicle and log[].byStaff in a single batch so the response
@@ -115,15 +147,18 @@ export class LeadsService {
   async create(dto: CreateLeadDto, userId: string, actorId?: string): Promise<any> {
     // NOTE: `userId` is the actor's display NAME (used for timeline `by`), NOT
     // an ObjectId. `actorId` is the real User _id, used to default the assignee.
-    if (!isValidObjectId(dto.buyer) || !isValidObjectId(dto.vehicle)) {
-      throw new BadRequestException('Invalid buyer or vehicle id');
+    if (!isValidObjectId(dto.vehicle)) {
+      throw new BadRequestException('Invalid vehicle id');
     }
-    const buyerObj = new Types.ObjectId(dto.buyer);
     const vehicleObj = new Types.ObjectId(dto.vehicle);
 
-    // Peel the sale details off the lead fields — they belong to the Sale, not
-    // the Lead schema, and only matter when the lead is created as CLOSED.
-    const { soldAt, amountPaid, paymentMethod, paymentStatus, saleDate, ...leadFields } = dto;
+    // Peel sale details + inline new-buyer fields off the lead fields — they
+    // belong to the Sale / CRM buyer, not the Lead schema. `buyer` is set
+    // explicitly below once resolved.
+    const {
+      soldAt, amountPaid, paymentMethod, paymentStatus, saleDate,
+      buyer: _dtoBuyer, newBuyerName, newBuyerEmail, newBuyerPhone, ...leadFields
+    } = dto;
     const closingOnCreate = dto.status === LeadStatus.CLOSED;
 
     // Guard 1: never let a lead be opened on a vehicle that's already sold —
@@ -153,21 +188,29 @@ export class LeadsService {
       }
     }
 
+    // Resolve the buyer now — AFTER the guards, so we never create a CRM buyer
+    // for a request that then gets rejected. Existing id → use it; new-buyer
+    // email → create (deduped, 409 on dup); neither → null (walk-in).
+    const buyerId = await this.resolveBuyerId({
+      buyerId: dto.buyer, newBuyerName, newBuyerEmail, newBuyerPhone,
+    });
+    const buyerObj = buyerId ? new Types.ObjectId(buyerId) : null;
+
     // Guard 2: a buyer can only have one lead per vehicle that isn't archived.
-    // Archived is the only terminal state that releases the slot — closed
-    // leads still hold it (the car was sold to them, so a "new lead from the
-    // same buyer on the same car" doesn't make sense until the sale is undone,
-    // which archives the lead via the cleanup path).
-    const dupe = await this.model.findOne({
-      buyer: buyerObj,
-      vehicle: vehicleObj,
-      isDeleted: false,
-      status: { $ne: LeadStatus.ARCHIVED },
-    }).select('_id status');
-    if (dupe) {
-      throw new ConflictException(
-        `A lead already exists for this buyer and vehicle. Archive the existing lead (status: ${dupe.status}) to create a new one.`,
-      );
+    // Skipped for walk-in (buyer-less) leads. Archived is the only terminal
+    // state that releases the slot — closed leads still hold it.
+    if (buyerObj) {
+      const dupe = await this.model.findOne({
+        buyer: buyerObj,
+        vehicle: vehicleObj,
+        isDeleted: false,
+        status: { $ne: LeadStatus.ARCHIVED },
+      }).select('_id status');
+      if (dupe) {
+        throw new ConflictException(
+          `A lead already exists for this buyer and vehicle. Archive the existing lead (status: ${dupe.status}) to create a new one.`,
+        );
+      }
     }
 
     // Leads are never unassigned — default to whoever is creating it (by _id).
@@ -182,15 +225,18 @@ export class LeadsService {
     // with its own timeline entry, so we don't pre-stamp a bogus closed state.
     const lead = await new this.model({
       ...leadFields,
+      buyer: buyerObj ?? undefined,
       assignedTo,
       status: closingOnCreate ? LeadStatus.NEW : leadFields.status,
       timeline: [{ date: new Date(), action: 'Lead created', by: userId }],
     }).save();
     // Pull buyer + vehicle title for the activity label — small extra reads
     // but the dashboard surface really wants "John Doe → 2024 Civic", not
-    // bare ObjectIds.
+    // bare ObjectIds. Buyer is null for walk-in leads.
     const [b, v] = await Promise.all([
-      this.buyerModel.findOne({ _id: buyerObj }).select('buyerName buyerEmail').lean(),
+      buyerObj
+        ? this.buyerModel.findOne({ _id: buyerObj }).select('buyerName buyerEmail').lean()
+        : Promise.resolve(null),
       this.vehicleModel.findOne({ _id: vehicleObj }).select('title vehicleNumber').lean(),
     ]);
     await this.activity.log({
@@ -198,7 +244,7 @@ export class LeadsService {
       action: 'created',
       entity: 'Lead',
       entityId: lead._id,
-      label: `${b?.buyerName ?? 'Buyer'} → ${v?.title ?? 'Vehicle'}`,
+      label: `${b?.buyerName ?? 'Walk-in'} → ${v?.title ?? 'Vehicle'}`,
       byName: userId,
       meta: { source: dto.source, status: dto.status ?? 'new' },
     });
@@ -209,8 +255,8 @@ export class LeadsService {
       await this.accountingService.createSale({
         vehicleId: String(vehicleObj),
         vehicleTitle: vehicle.title,
-        buyerName: b?.buyerName ?? 'Buyer',
-        buyerEmail: b?.buyerEmail,
+        buyerName: b?.buyerName ?? 'Walk-in',
+        buyerEmail: b?.buyerEmail ?? '—',
         salePrice: soldAt as number,
         costPrice: (vehicle as any).costPrice ?? 0,
         discount: 0,
@@ -219,7 +265,7 @@ export class LeadsService {
         paymentMethod: paymentMethod ?? 'cash',
         paymentStatus: paymentStatus ?? 'paid',
         notes: dto.notes ?? `Closed on creation · lead ${String(lead._id)}`,
-        buyerLeadId: String(buyerObj),
+        buyerLeadId: buyerObj ? String(buyerObj) : undefined,
         leadId: String(lead._id),
         actorName: userId,
       });
@@ -228,25 +274,118 @@ export class LeadsService {
         action: 'closed',
         entity: 'Lead',
         entityId: lead._id,
-        label: `${b?.buyerName ?? 'Buyer'} bought ${vehicle.title} for $${Number(soldAt).toLocaleString()}`,
+        label: `${b?.buyerName ?? 'Walk-in'} bought ${vehicle.title} for $${Number(soldAt).toLocaleString()}`,
         byName: userId,
         meta: { soldAt, paymentMethod, paymentStatus, closedOnCreate: true },
       });
     }
 
     // Mirror the inquiry onto the buyer's CRM record so the vehicle shows up
-    // under "Vehicles Interested" on the buyer detail page. $addToSet keeps it
-    // idempotent (no duplicate if they were already interested). Best-effort —
-    // a buyer-sync failure must never fail lead creation.
+    // under "Vehicles Interested" on the buyer detail page. Skipped for walk-in
+    // (no buyer). $addToSet keeps it idempotent. Best-effort — a sync failure
+    // must never fail lead creation.
+    if (buyerObj) {
+      try {
+        await this.buyerModel.updateOne(
+          { _id: buyerObj, isDeleted: false },
+          { $addToSet: { interestedVehicles: vehicleObj } },
+        );
+      } catch (err) {
+        this.logger.warn(
+          `lead create: buyer interestedVehicles sync failed buyer=${buyerId}: ${err}`,
+        );
+      }
+    }
+
+    return this.findById(String(lead._id));
+  }
+
+  /**
+   * Assign a buyer to an existing walk-in (buyer-less) lead. Accepts an existing
+   * CRM buyer id or new-buyer details (created inline, deduped by email). If the
+   * lead is already CLOSED (a completed walk-in sale), the linked Sale row's
+   * buyer + that buyer's purchases[] are updated too (attachBuyerToSale).
+   */
+  async assignBuyer(id: string, dto: AssignBuyerDto, userName: string): Promise<any> {
+    if (!isValidObjectId(id)) throw new BadRequestException('Invalid lead id');
+    const lead = await this.model.findOne({ _id: id, isDeleted: false });
+    if (!lead) throw new NotFoundException('Lead not found');
+    if (lead.buyer) throw new ConflictException('This lead already has a buyer.');
+
+    const buyerId = await this.resolveBuyerId({
+      buyerId: dto.buyerLeadId,
+      newBuyerName: dto.newBuyerName,
+      newBuyerEmail: dto.newBuyerEmail,
+      newBuyerPhone: dto.newBuyerPhone,
+    });
+    if (!buyerId) {
+      throw new BadRequestException('Provide an existing buyer or new-buyer details to assign.');
+    }
+    const buyerObj = new Types.ObjectId(buyerId);
+
+    // Guard 2 for non-terminal leads: a buyer can't hold two active leads on the
+    // same vehicle. Closed/archived leads are exempt (the sale is the record).
+    if (lead.status !== LeadStatus.CLOSED && lead.status !== LeadStatus.ARCHIVED) {
+      const dupe = await this.model.findOne({
+        buyer: buyerObj,
+        vehicle: lead.vehicle,
+        isDeleted: false,
+        status: { $ne: LeadStatus.ARCHIVED },
+        _id: { $ne: lead._id },
+      }).select('_id status');
+      if (dupe) {
+        throw new ConflictException(
+          `That buyer already has a lead for this vehicle (status: ${dupe.status}).`,
+        );
+      }
+    }
+
+    const buyer = await this.buyerModel
+      .findOne({ _id: buyerObj })
+      .select('buyerName buyerEmail')
+      .lean();
+
+    lead.buyer = buyerObj;
+    lead.timeline.push({
+      date: new Date(),
+      action: `Buyer assigned: ${buyer?.buyerName ?? 'buyer'}`,
+      by: userName,
+    });
+    await lead.save();
+
+    await this.activity.log({
+      module: 'leads',
+      action: 'updated',
+      entity: 'Lead',
+      entityId: lead._id,
+      label: `Buyer assigned — ${buyer?.buyerName ?? 'buyer'}`,
+      byName: userName,
+      meta: { buyerId },
+    });
+
+    // Buyer's interested-vehicles mirror.
     try {
       await this.buyerModel.updateOne(
         { _id: buyerObj, isDeleted: false },
-        { $addToSet: { interestedVehicles: vehicleObj } },
+        { $addToSet: { interestedVehicles: lead.vehicle } },
       );
     } catch (err) {
-      this.logger.warn(
-        `lead create: buyer interestedVehicles sync failed buyer=${dto.buyer}: ${err}`,
-      );
+      this.logger.warn(`assignBuyer interestedVehicles sync failed: ${err}`);
+    }
+
+    // Closed walk-in sale → reflect the buyer on the Sale + purchases[].
+    if (lead.status === LeadStatus.CLOSED && lead.vehicle && buyer) {
+      try {
+        await this.accountingService.attachBuyerToSale(String(lead.vehicle), {
+          buyerLeadId: buyerId,
+          buyerName: buyer.buyerName,
+          buyerEmail: buyer.buyerEmail,
+        });
+      } catch (err) {
+        this.logger.error(
+          `assignBuyer: attachBuyerToSale failed vehicle=${lead.vehicle}: ${err instanceof Error ? err.stack : err}`,
+        );
+      }
     }
 
     return this.findById(String(lead._id));
