@@ -107,6 +107,26 @@ export class InventoryController {
     return { message: 'Vehicle marked as sold', data: sale };
   }
 
+  @Post(':id/mark-unsold')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
+  @ApiOperation({
+    summary: 'Mark a vehicle unsold (reverse the sale)',
+    description:
+      'Reverses the sale: archives any linked BHPH loan (income backed out) + ' +
+      'open-balance receivable, soft-deletes the Sale, pulls the buyer purchase, ' +
+      'archives the originating closed lead, and returns the car to the lot.',
+  })
+  @ApiParam({ name: 'id', description: 'Vehicle ObjectId' })
+  @ApiResponse({ status: 201, description: 'Vehicle marked unsold' })
+  @ApiResponse({ status: 400, description: 'Vehicle is not sold' })
+  async markUnsold(@Param('id') id: string, @CurrentUser() user: any) {
+    const actorName = user
+      ? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || undefined
+      : undefined;
+    const data = await this.inventoryService.markUnsold(id, actorName);
+    return { message: 'Vehicle marked unsold', data };
+  }
+
   /**
    * GET /api/v1/inventory/:id/sold-buyer
    * The buyer behind a sold vehicle (from its closed lead) — or a "Walk-in"

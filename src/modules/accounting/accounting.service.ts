@@ -1,12 +1,15 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types, isValidObjectId } from 'mongoose';
-import { Sale, SaleDocument, Expense, ExpenseDocument } from './schemas/accounting.schema';
+import { Sale, SaleDocument, Expense, ExpenseDocument, Income, IncomeDocument } from './schemas/accounting.schema';
+import { ReceivablesService } from './receivables.service';
 import { Vehicle, VehicleDocument, VehicleStatus } from '../inventory/schemas/vehicle.schema';
 import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
 import { Lead, LeadDocument, LeadStatus } from '../leads/schemas/lead.schema';
 import { ActivityService } from '../activity/activity.service';
 import { PaginatedResult } from '../../common/dto/pagination.dto';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { NotificationEvent, SaleRecordedEvent } from '../notifications/notification-events';
 
 /** Category tag for vehicle reconditioning spends mirrored into the expense ledger. */
 export const RECONDITIONING_CATEGORY = 'reconditioning';
@@ -114,10 +117,13 @@ export class AccountingService implements OnModuleInit {
   constructor(
     @InjectModel(Sale.name) private saleModel: Model<SaleDocument>,
     @InjectModel(Expense.name) private expenseModel: Model<ExpenseDocument>,
+    @InjectModel(Income.name) private incomeModel: Model<IncomeDocument>,
     @InjectModel(Vehicle.name) private vehicleModel: Model<VehicleDocument>,
     @InjectModel(BuyerLead.name) private buyerModel: Model<BuyerLeadDocument>,
     @InjectModel(Lead.name) private leadModel: Model<LeadDocument>,
     private readonly activity: ActivityService,
+    private readonly events: EventEmitter2,
+    private readonly receivables: ReceivablesService,
   ) {}
 
   /**
@@ -150,8 +156,11 @@ export class AccountingService implements OnModuleInit {
     if (Object.keys(saleDateFilter).length) salesMatch.saleDate = saleDateFilter;
     const expensesMatch: any = { isDeleted: false };
     if (Object.keys(expenseDateFilter).length) expensesMatch.date = expenseDateFilter;
+    // Income (BHPH interest) shares the expense date field name.
+    const incomeMatch: any = { isDeleted: false };
+    if (Object.keys(expenseDateFilter).length) incomeMatch.date = expenseDateFilter;
 
-    const [salesAgg, expensesAgg, outstandingAgg] = await Promise.all([
+    const [salesAgg, expensesAgg, outstandingAgg, incomeAgg] = await Promise.all([
       this.saleModel.aggregate([
         { $match: salesMatch },
         {
@@ -199,9 +208,23 @@ export class AccountingService implements OnModuleInit {
           },
         },
       ]),
+      this.incomeModel.aggregate([
+        { $match: incomeMatch },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: '$amount' },
+            interest: { $sum: { $cond: [{ $eq: ['$category', 'interest'] }, '$amount', 0] } },
+          },
+        },
+      ]),
     ]);
 
-    const revenue = salesAgg[0]?.totalRevenue || 0;
+    const saleRevenue = salesAgg[0]?.totalRevenue || 0;
+    const totalIncome = incomeAgg[0]?.total || 0;
+    const interestIncome = incomeAgg[0]?.interest || 0;
+    // Total revenue = car sales (net) + non-sale income (BHPH interest).
+    const revenue = saleRevenue + totalIncome;
     const cost = salesAgg[0]?.totalCost || 0;
     const operational = expensesAgg[0]?.operational || 0;
     const reconditioning = expensesAgg[0]?.reconditioning || 0;
@@ -215,6 +238,10 @@ export class AccountingService implements OnModuleInit {
     const totalExpenses = operational + reconditioning + cost;
     return {
       totalRevenue: revenue,
+      // Revenue split so the UI can show "car sales" vs "financing interest".
+      totalSalesRevenue: saleRevenue,
+      totalIncome,
+      totalInterestIncome: interestIncome,
       totalCost: cost,
       totalSpend: reconditioning,
       // Component breakdown so the UI can render Operational / Reconditioning /
@@ -519,7 +546,105 @@ export class AccountingService implements OnModuleInit {
       }
     }
 
+    // ── Side-effect 5: open a receivable for a partial/unpaid NON-BHPH sale ──
+    // BHPH sales are tracked by their Loan instead. A receivable is the payment
+    // tracker for everything else that isn't fully paid at sale time; recording
+    // payments on it later shrinks the sale's outstanding (cash collected).
+    if (dto.paymentMethod !== 'bhph' && (dto.paymentStatus === 'partial' || dto.paymentStatus === 'pending')) {
+      try {
+        await this.receivables.createForSale({
+          saleId: String(sale._id),
+          vehicleId: dto.vehicleId ? String(dto.vehicleId) : undefined,
+          vehicleTitle: dto.vehicleTitle,
+          buyerName: dto.buyerName,
+          buyerEmail: dto.buyerEmail,
+          buyerLeadId,
+          leadId,
+          paymentMethod: dto.paymentMethod ?? 'cash',
+          totalAmount: net,
+          downPayment: amountPaid,
+        });
+      } catch (err) {
+        this.logger.error(`createSale side-effect 5 (receivable) failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // Notify accounting + sales managers that a sale landed (in-app). All three
+    // sale entry points (Record Sale / Mark Sold / Close Lead) funnel here.
+    this.events.emit(NotificationEvent.SALE_RECORDED, {
+      saleId: String(sale._id),
+      vehicleTitle: dto.vehicleTitle,
+      buyerName: dto.buyerName,
+      net,
+      actorId: dto.actorId,
+      actorName: dto.actorName,
+    } as SaleRecordedEvent);
+
     return sale;
+  }
+
+  // ── BHPH sync surface (called by BhphService; keeps accounting in step with
+  //    loan payments without importing BhphModule) ──────────────────────────
+
+  /**
+   * Sync a BHPH-linked Sale's collected amount as EMI principal is repaid.
+   * Lightweight (no activity log — this fires on every payment) and best-effort.
+   * `amountPaid` is clamped to the sale's net so outstanding never goes negative.
+   */
+  async syncSalePayment(
+    saleId: string,
+    opts: { salePrice?: number; amountPaid: number; paymentStatus: 'paid' | 'partial' | 'pending' },
+  ): Promise<void> {
+    if (!isValidObjectId(saleId)) return;
+    const sale = await this.saleModel.findOne({ _id: saleId, isDeleted: false }).select('salePrice discount');
+    if (!sale) return;
+    const effSalePrice = opts.salePrice != null ? opts.salePrice : Number(sale.salePrice) || 0;
+    const net = Math.max(0, effSalePrice - (Number(sale.discount) || 0));
+    const clamped = Math.max(0, Math.min(net, Number(opts.amountPaid) || 0));
+    const patch: any = { amountPaid: clamped, paymentStatus: opts.paymentStatus };
+    if (opts.salePrice != null) patch.salePrice = opts.salePrice;
+    await this.saleModel.updateOne({ _id: saleId, isDeleted: false }, { $set: patch });
+  }
+
+  /**
+   * Replace the interest-income rows for a loan with the supplied set (one row
+   * per interest-bearing payment). Declarative + idempotent: deletes the loan's
+   * existing bhph-interest rows, then inserts the fresh ones. Called after any
+   * payment change so revenue/profit always match the loan's collected interest.
+   */
+  async syncLoanInterestIncome(
+    loanId: string,
+    rows: { paymentId: string; date: Date; amount: number; title: string }[],
+  ): Promise<void> {
+    await this.incomeModel.deleteMany({ source: 'bhph-interest', loanId: String(loanId) });
+    const docs = rows
+      .filter((r) => (Number(r.amount) || 0) > 0)
+      .map((r) => ({
+        title: r.title,
+        amount: Math.round((Number(r.amount) || 0) * 100) / 100,
+        date: r.date,
+        category: 'interest',
+        source: 'bhph-interest',
+        loanId: String(loanId),
+        paymentId: String(r.paymentId),
+        isDeleted: false,
+      }));
+    if (docs.length) await this.incomeModel.insertMany(docs);
+  }
+
+  /** Remove all interest-income rows for a loan (loan archived/reversed). */
+  async removeLoanIncome(loanId: string): Promise<void> {
+    await this.incomeModel.deleteMany({ source: 'bhph-interest', loanId: String(loanId) });
+  }
+
+  /** Id of the live (non-deleted) Sale for a vehicle, or null. Used by BHPH to
+   *  link a loan to an already-recorded sale instead of creating a duplicate. */
+  async findLiveSaleIdByVehicle(vehicleId: string): Promise<string | null> {
+    if (!isValidObjectId(vehicleId)) return null;
+    const s = await this.saleModel
+      .findOne({ vehicleId: String(vehicleId), isDeleted: false })
+      .select('_id');
+    return s ? String(s._id) : null;
   }
 
   /**
@@ -689,7 +814,7 @@ export class AccountingService implements OnModuleInit {
 
   async getProfitLoss(startDate: string, endDate: string): Promise<any> {
     const dateFilter = { $gte: new Date(startDate), $lte: new Date(endDate) };
-    const [sales, expenses] = await Promise.all([
+    const [sales, expenses, incomeByMonth] = await Promise.all([
       this.saleModel.aggregate([
         { $match: { isDeleted: false, saleDate: dateFilter } },
         {
@@ -709,7 +834,27 @@ export class AccountingService implements OnModuleInit {
         { $group: { _id: { $month: '$date' }, total: { $sum: '$amount' } } },
         { $sort: { _id: 1 } },
       ]),
+      this.incomeModel.aggregate([
+        { $match: { isDeleted: false, date: dateFilter } },
+        { $group: { _id: { $month: '$date' }, interest: { $sum: '$amount' } } },
+        { $sort: { _id: 1 } },
+      ]),
     ]);
+
+    // Fold interest income into the matching month's revenue so the monthly
+    // Revenue/Profit chart stays consistent with the summary totals.
+    const incomeMonth = new Map<number, number>(incomeByMonth.map((r: any) => [r._id, r.interest]));
+    for (const row of sales as any[]) {
+      const extra = incomeMonth.get(row._id) || 0;
+      if (extra) { row.revenue += extra; row.interest = extra; }
+      incomeMonth.delete(row._id);
+    }
+    // Months with interest but no car sale still need a revenue point.
+    for (const [month, interest] of incomeMonth) {
+      sales.push({ _id: month, revenue: interest, cost: 0, spend: 0, count: 0, interest });
+    }
+    (sales as any[]).sort((a, b) => a._id - b._id);
+
     return { sales, expenses, summary: await this.getSummary(startDate, endDate) };
   }
 
@@ -765,6 +910,11 @@ export class AccountingService implements OnModuleInit {
         { $pull: { purchases: { saleId: { $in: saleIds } } } },
       );
       pulledPurchases = pullRes.modifiedCount ?? 0;
+    }
+
+    // Archive any open-balance receivables tied to these sales (best-effort).
+    for (const sid of saleIds) {
+      try { await this.receivables.archiveForSale(String(sid)); } catch { /* best-effort */ }
     }
 
     const ops: Promise<any>[] = [

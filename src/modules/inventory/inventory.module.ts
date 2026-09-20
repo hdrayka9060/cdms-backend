@@ -12,6 +12,7 @@ import { CalendarEvent, CalendarEventSchema } from '../calendar/schemas/calendar
 import { CommunicationLog, CommunicationLogSchema } from '../communication/schemas/communication-log.schema';
 import { AccountingModule } from '../accounting/accounting.module';
 import { CrmBuyersModule } from '../crm-buyers/crm-buyers.module';
+import { BhphModule } from '../bhph/bhph.module';
 
 @Module({
   imports: [
@@ -37,6 +38,9 @@ import { CrmBuyersModule } from '../crm-buyers/crm-buyers.module';
     // is entered manually. CrmBuyersModule imports no InventoryModule, so this
     // is a plain (non-circular) import.
     CrmBuyersModule,
+    // Mark-sold with paymentMethod=bhph auto-creates a linked BHPH loan.
+    // One-way (BhphModule imports only the Vehicle schema, not InventoryModule).
+    BhphModule,
     MulterModule.register({ dest: './uploads/vehicles' }),
   ],
   controllers: [InventoryController],

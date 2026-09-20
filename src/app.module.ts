@@ -4,6 +4,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { PermissionsGuard } from './common/guards/permissions.guard';
 import { AuthModule } from './modules/auth/auth.module';
@@ -20,6 +21,7 @@ import { LeadsModule } from './modules/leads/leads.module';
 import { CalendarModule } from './modules/calendar/calendar.module';
 import { AccountingModule } from './modules/accounting/accounting.module';
 import { BhphModule } from './modules/bhph/bhph.module';
+import { DocumentsModule } from './modules/documents/documents.module';
 import { MarketingModule } from './modules/marketing/marketing.module';
 import { DealerWebsiteModule } from './modules/dealer-website/dealer-website.module';
 import { SupportModule } from './modules/support/support.module';
@@ -31,6 +33,7 @@ import { FacebookModule } from './modules/facebook/facebook.module';
 import { StorageModule } from './common/storage/storage.module';
 import { AdsApiModule } from './modules/ads-api/ads-api.module';
 import { AdsAnalyticsModule } from './modules/ads-analytics/ads-analytics.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 @Module({
   providers: [
@@ -94,6 +97,9 @@ import { AdsAnalyticsModule } from './modules/ads-analytics/ads-analytics.module
     // Scheduling
     ScheduleModule.forRoot(),
 
+    // In-process event bus (domain events → notifications, decoupled + async).
+    EventEmitterModule.forRoot(),
+
     // Feature Modules
     AuthModule,
     UsersModule,
@@ -125,6 +131,7 @@ import { AdsAnalyticsModule } from './modules/ads-analytics/ads-analytics.module
     CalendarModule,
     AccountingModule,
     BhphModule,
+    DocumentsModule,
     MarketingModule,
     AdsAnalyticsModule,
     DealerWebsiteModule,
@@ -133,6 +140,7 @@ import { AdsAnalyticsModule } from './modules/ads-analytics/ads-analytics.module
     MessagingModule,
     SettingsModule,
     FacebookModule,
+    NotificationsModule,
   ],
 })
 export class AppModule {}

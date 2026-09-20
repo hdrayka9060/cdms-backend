@@ -111,6 +111,11 @@ export class Lead {
   @Prop({ default: false })
   isDeleted: boolean;
 
+  // Last time a "this lead has gone quiet" reminder was sent, so the stale-lead
+  // cron doesn't nag daily about the same untouched lead.
+  @Prop({ type: Date, default: null })
+  staleReminderAt: Date | null;
+
   createdAt: Date;
   updatedAt: Date;
 }

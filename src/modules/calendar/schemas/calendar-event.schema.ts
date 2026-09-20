@@ -153,6 +153,10 @@ export class CalendarEvent {
   @Prop({ default: '' }) notes: string;
   @Prop({ default: false }) isDeleted: boolean;
 
+  // Set when the "starting soon" reminder has been sent, so the reminder cron
+  // never notifies the same event twice.
+  @Prop({ type: Date, default: null }) reminderSentAt: Date | null;
+
   createdAt: Date;
   updatedAt: Date;
 }

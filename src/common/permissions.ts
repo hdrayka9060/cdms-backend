@@ -88,10 +88,25 @@ export const DEFAULT_ROLES: {
       { module: AppModule.CRM_SELLERS, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.CRM_BUYERS, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.LEADS, actions: [PermissionAction.VIEW, PermissionAction.EDIT, PermissionAction.DELETE] },
+      // Sales managers oversee in-house financing (BHPH) end-to-end.
+      { module: AppModule.BHPH, actions: [PermissionAction.VIEW, PermissionAction.EDIT, PermissionAction.DELETE] },
       { module: AppModule.CALENDAR, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.COMMUNICATION, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
       { module: AppModule.STAFF, actions: [PermissionAction.VIEW] },
       { module: AppModule.FACEBOOK_LISTINGS, actions: [PermissionAction.VIEW, PermissionAction.EDIT] },
+    ],
+  },
+  {
+    name: 'Finance / Collections',
+    description: 'Manages BHPH loans, collections and payment tracking',
+    permissions: [
+      { module: AppModule.DASHBOARD, actions: [PermissionAction.VIEW] },
+      // Full control over the financing book.
+      { module: AppModule.BHPH, actions: [PermissionAction.VIEW, PermissionAction.EDIT, PermissionAction.DELETE] },
+      // Read the sales ledger (loans post interest income + drive sale outstanding).
+      { module: AppModule.ACCOUNTING, actions: [PermissionAction.VIEW] },
+      // Look up the borrower's CRM record.
+      { module: AppModule.CRM_BUYERS, actions: [PermissionAction.VIEW] },
     ],
   },
   {

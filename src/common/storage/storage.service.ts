@@ -1,6 +1,11 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+} from '@aws-sdk/client-s3';
 import { Storage, type Bucket } from '@google-cloud/storage';
 import { randomUUID } from 'crypto';
 import { extname, join } from 'path';
@@ -241,6 +246,47 @@ export class StorageService implements OnModuleInit {
     }
   }
 
+  /**
+   * Read back the bytes of a previously-stored object. Accepts either a cloud
+   * public URL for our bucket or a local `/uploads/...` path — the mirror of
+   * `remove()`. Used by the document signer to load a template's bytes for
+   * stamping. Throws if the object cannot be read.
+   */
+  async read(urlOrPath: string): Promise<Buffer> {
+    if (!urlOrPath) throw new Error('read: empty path');
+
+    // Our own cloud bucket (GCS/S3) by public-base prefix.
+    if (this._enabled && this.publicBase && urlOrPath.startsWith(`${this.publicBase}/`)) {
+      const key = urlOrPath.slice(this.publicBase.length + 1);
+      if (this.driver === 'gcs' && this.gcsBucket) {
+        const [buf] = await this.gcsBucket.file(key).download();
+        return buf;
+      }
+      if (this.driver === 's3' && this.s3) {
+        const out = await this.s3.send(
+          new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+        );
+        return Buffer.from(await out.Body!.transformToByteArray());
+      }
+    }
+
+    // Local-disk object.
+    if (urlOrPath.startsWith('/uploads/')) {
+      const root = this.uploadDest.replace(/^\.\//, '');
+      const rel = urlOrPath.replace(/^\/uploads\//, '');
+      return fs.readFile(join(process.cwd(), root, rel));
+    }
+
+    // Any other absolute URL (different bucket / CDN) — fetch over HTTP.
+    if (/^https?:\/\//i.test(urlOrPath)) {
+      const res = await fetch(urlOrPath);
+      if (!res.ok) throw new Error(`read: fetch ${urlOrPath} -> ${res.status}`);
+      return Buffer.from(await res.arrayBuffer());
+    }
+
+    throw new Error(`read: unsupported path ${urlOrPath}`);
+  }
+
   private extFromMime(mime: string): string {
     switch ((mime || '').toLowerCase()) {
       case 'image/jpeg':
@@ -251,6 +297,8 @@ export class StorageService implements OnModuleInit {
         return '.webp';
       case 'image/gif':
         return '.gif';
+      case 'application/pdf':
+        return '.pdf';
       default:
         return '';
     }

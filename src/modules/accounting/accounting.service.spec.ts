@@ -2,11 +2,12 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getModelToken } from '@nestjs/mongoose';
 import { Types } from 'mongoose';
 import { AccountingService } from './accounting.service';
-import { Sale, Expense } from './schemas/accounting.schema';
+import { Sale, Expense, Income } from './schemas/accounting.schema';
 import { Vehicle } from '../inventory/schemas/vehicle.schema';
 import { BuyerLead } from '../crm-buyers/schemas/buyer-lead.schema';
 import { Lead, LeadStatus } from '../leads/schemas/lead.schema';
 import { ActivityService } from '../activity/activity.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 /**
  * Unit-tests the inverse of the unified sale flow.
@@ -31,6 +32,7 @@ describe('AccountingService.cleanupSoldArtifacts', () => {
   // resets these to set up its scenario.
   const saleModel: any = {};
   const expenseModel: any = {};
+  const incomeModel: any = {};
   const vehicleModel: any = {};
   const buyerModel: any = {};
   const leadModel: any = {};
@@ -52,12 +54,15 @@ describe('AccountingService.cleanupSoldArtifacts', () => {
         AccountingService,
         { provide: getModelToken(Sale.name), useValue: saleModel },
         { provide: getModelToken(Expense.name), useValue: expenseModel },
+        { provide: getModelToken(Income.name), useValue: incomeModel },
         { provide: getModelToken(Vehicle.name), useValue: vehicleModel },
         { provide: getModelToken(BuyerLead.name), useValue: buyerModel },
         { provide: getModelToken(Lead.name), useValue: leadModel },
         // Stub ActivityService — these tests only care about cleanup behaviour,
         // not what activity entries got logged. `log()` returns void anyway.
         { provide: ActivityService, useValue: { log: jest.fn().mockResolvedValue(undefined) } },
+        // AccountingService emits SALE_RECORDED; these tests don't assert on it.
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
       ],
     }).compile();
 

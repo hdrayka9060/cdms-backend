@@ -9,6 +9,8 @@ build/
 .env
 .env.local
 .env.*.local
+.env.bak.1786227225
+.env.bak.fb.1786652928
 
 # Uploads (local files)
 uploads/

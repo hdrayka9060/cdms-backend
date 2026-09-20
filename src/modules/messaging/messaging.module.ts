@@ -23,7 +23,9 @@ import { User, UserSchema } from '../users/schemas/user.schema';
   ],
   controllers: [MessagingController],
   providers: [MessagingService, MessagingGateway],
-  // Exported so UsersService can fire the staff-removal cascade (onUserRemoved).
-  exports: [MessagingService],
+  // MessagingService: so UsersService can fire the staff-removal cascade
+  // (onUserRemoved). MessagingGateway: so NotificationsModule can push
+  // `notification:new` over the same socket channel (no second WS layer).
+  exports: [MessagingService, MessagingGateway],
 })
 export class MessagingModule {}

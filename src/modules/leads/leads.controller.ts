@@ -43,6 +43,26 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 export class LeadsController {
   constructor(private readonly service: LeadsService) {}
 
+  @Post('reminders/run')
+  @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
+  @ApiOperation({
+    summary: 'Send stale-lead follow-up reminders now',
+    description:
+      'Manually runs the stale-lead pass (normally a daily cron): notifies the assigned rep of ' +
+      'open leads with no activity for `maxIdleDays` (default 5). Pass `leadId` to nudge one ' +
+      'specific lead. Returns the count sent.',
+  })
+  async runReminders(
+    @Query('maxIdleDays') maxIdleDays?: string,
+    @Query('leadId') leadId?: string,
+  ) {
+    const sent = await this.service.sendStaleLeadReminders({
+      maxIdleDays: maxIdleDays !== undefined ? parseInt(maxIdleDays, 10) : undefined,
+      leadId,
+    });
+    return { message: 'Reminders processed', data: { sent } };
+  }
+
   @Post()
   @RequirePermission(AppModule.LEADS, PermissionAction.EDIT)
   @ApiOperation({
@@ -96,7 +116,7 @@ export class LeadsController {
   @ApiParam({ name: 'id', description: 'MongoDB ObjectId' })
   async update(@Param('id') id: string, @Body() dto: UpdateLeadDto, @CurrentUser() user: any) {
     const actorName = formatActor(user);
-    const lead = await this.service.update(id, dto, actorName);
+    const lead = await this.service.update(id, dto, actorName, user?._id ? String(user._id) : undefined);
     return { message: 'Lead updated', data: lead };
   }
 

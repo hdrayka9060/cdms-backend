@@ -4,7 +4,7 @@ import { Model } from 'mongoose';
 import { Vehicle, VehicleDocument, VehicleStatus } from '../inventory/schemas/vehicle.schema';
 import { SellerLead, SellerLeadDocument } from '../crm-sellers/schemas/seller-lead.schema';
 import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
-import { Sale, SaleDocument, Expense, ExpenseDocument } from '../accounting/schemas/accounting.schema';
+import { Sale, SaleDocument, Expense, ExpenseDocument, Income, IncomeDocument } from '../accounting/schemas/accounting.schema';
 import { CalendarEvent, CalendarEventDocument } from '../calendar/schemas/calendar-event.schema';
 import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
 
@@ -35,6 +35,7 @@ export class DashboardService {
     @InjectModel(BuyerLead.name) private buyerModel: Model<BuyerLeadDocument>,
     @InjectModel(Sale.name) private saleModel: Model<SaleDocument>,
     @InjectModel(Expense.name) private expenseModel: Model<ExpenseDocument>,
+    @InjectModel(Income.name) private incomeModel: Model<IncomeDocument>,
     @InjectModel(CalendarEvent.name) private calendarModel: Model<CalendarEventDocument>,
     @InjectModel(Lead.name) private leadModel: Model<LeadDocument>,
   ) {}
@@ -109,7 +110,7 @@ export class DashboardService {
     };
 
     const [
-      totalVehicles, vehiclesSold, salesAgg, operationalAgg, activeLeads, pendingTestDrives,
+      totalVehicles, vehiclesSold, salesAgg, operationalAgg, incomeAgg, activeLeads, pendingTestDrives,
     ] = await Promise.all([
       // Stock counts — un-windowed so they match Inventory / Leads reality.
       this.vehicleModel.countDocuments(allVehiclesFilter),
@@ -138,11 +139,17 @@ export class DashboardService {
           },
         },
       ]),
+      // BHPH interest income in the window — adds to revenue + profit.
+      this.incomeModel.aggregate([
+        { $match: { isDeleted: false, ...inRange('date') } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
       this.leadModel.countDocuments(leadFilter),
       this.calendarModel.countDocuments(testDriveFilter),
     ]);
 
-    const revenue = salesAgg[0]?.revenue ?? 0;
+    const income = incomeAgg[0]?.total ?? 0;
+    const revenue = (salesAgg[0]?.revenue ?? 0) + income;
     const cost = salesAgg[0]?.cost ?? 0;
     const operational = operationalAgg[0]?.operational ?? 0;
     const spend = operationalAgg[0]?.reconditioning ?? 0;

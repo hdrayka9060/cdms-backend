@@ -44,6 +44,20 @@ function actorFrom(user: any) {
 export class CalendarController {
   constructor(private readonly service: CalendarService) {}
 
+  @Post('reminders/run')
+  @RequirePermission(AppModule.CALENDAR, PermissionAction.EDIT)
+  @ApiOperation({
+    summary: 'Send due "starting soon" reminders now',
+    description:
+      'Manually runs the appointment-reminder pass (normally a 10-minute cron): ' +
+      'notifies the assignee of every scheduled event starting within the next hour ' +
+      'that has not already been reminded. Returns the count sent.',
+  })
+  async runReminders() {
+    const sent = await this.service.sendDueAppointmentReminders();
+    return { message: 'Reminders processed', data: { sent } };
+  }
+
   @Post('events')
   @RequirePermission(AppModule.CALENDAR, PermissionAction.EDIT)
   @ApiOperation({

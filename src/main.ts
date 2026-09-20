@@ -31,22 +31,24 @@ async function bootstrap() {
     .map((o) => o.trim())
     .filter(Boolean);
 
-  // ── Static assets (uploaded vehicle images, ticket attachments) ──────────
-  // Reachable at http://localhost:3000/uploads/vehicles/<filename>.
-  // Note: helmet's crossOriginResourcePolicy default ("same-origin") would block the
-  // frontend from loading these from a different port; set to "cross-origin" below.
-  const uploadDest = configService.get<string>('UPLOAD_DEST', './uploads');
-  app.useStaticAssets(join(process.cwd(), uploadDest.replace(/^\.\//, '')), {
-    prefix: '/uploads/',
-  });
-
   // ── Security ──────────────────────────────────────────────────────────────
+  // Registered BEFORE static assets so /uploads responses also carry CORS +
+  // cross-origin-resource headers — needed so the frontend can `fetch()` an
+  // uploaded file (e.g. pdf.js loading a document to render for signing), not
+  // just embed it as an <img>/<embed>.
   app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
   app.enableCors({
     origin: allowedOrigins,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,
+  });
+
+  // ── Static assets (uploaded vehicle images, ticket attachments, documents) ─
+  // Reachable at http://localhost:3000/uploads/<prefix>/<filename>.
+  const uploadDest = configService.get<string>('UPLOAD_DEST', './uploads');
+  app.useStaticAssets(join(process.cwd(), uploadDest.replace(/^\.\//, '')), {
+    prefix: '/uploads/',
   });
 
   // ── Global prefix ─────────────────────────────────────────────────────────

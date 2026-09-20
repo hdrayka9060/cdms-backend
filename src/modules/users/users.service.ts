@@ -23,6 +23,8 @@ import { RolesService } from '../roles/roles.service';
 import { ActivityService } from '../activity/activity.service';
 import { MailService } from '../mail/mail.service';
 import { MessagingService } from '../messaging/messaging.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { NotificationEvent, UserInviteAcceptedEvent, UserRoleChangedEvent } from '../notifications/notification-events';
 
 /** 7 days. Long enough that a Friday-afternoon invite still works on Monday. */
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -47,6 +49,7 @@ export class UsersService {
     private readonly mail: MailService,
     private readonly config: ConfigService,
     private readonly messaging: MessagingService,
+    private readonly events: EventEmitter2,
   ) {}
 
   // ── Generic CRUD ────────────────────────────────────────────────────────
@@ -162,6 +165,12 @@ export class UsersService {
           byId: actorId,
           meta: { from: fromRoleName, to: toRoleName, fieldsChanged },
         });
+        // Tell the affected user their access level changed (security).
+        this.events.emit(NotificationEvent.USER_ROLE_CHANGED, {
+          userId: String(updated._id),
+          roleName: toRoleName,
+          actorId,
+        } as UserRoleChangedEvent);
       } else if (fieldsChanged.length > 0) {
         await this.activity.log({
           module: 'users',
@@ -407,6 +416,13 @@ export class UsersService {
     } catch (err) {
       this.logger.warn(`activity log failed for invite-accept id=${user._id}: ${err}`);
     }
+
+    // Notify whoever manages staff that the invite was accepted.
+    this.events.emit(NotificationEvent.USER_INVITE_ACCEPTED, {
+      userId: String(user._id),
+      name: `${user.firstName} ${user.lastName}`.trim() || user.email,
+      email: user.email,
+    } as UserInviteAcceptedEvent);
 
     // Re-fetch with populated role so the caller (AuthService.acceptInvite)
     // has the same shape it would get from login.

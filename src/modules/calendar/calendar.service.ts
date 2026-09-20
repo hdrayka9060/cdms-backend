@@ -7,11 +7,13 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { FilterQuery, Model, Types } from 'mongoose';
 import {
   CalendarEvent,
   CalendarEventDocument,
   EventType,
+  EventStatus,
   MeetingType,
   ParticipantStatus,
 } from './schemas/calendar-event.schema';
@@ -24,6 +26,13 @@ import { PaginatedResult } from '../../common/dto/pagination.dto';
 import { ActivityService } from '../activity/activity.service';
 import { GoogleMeetService } from '../google-meet/google-meet.service';
 import { MailService } from '../mail/mail.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import {
+  NotificationEvent,
+  AppointmentBookedEvent,
+  AppointmentChangedEvent,
+  AppointmentReminderEvent,
+} from '../notifications/notification-events';
 import { User, UserDocument } from '../users/schemas/user.schema';
 import { Lead, LeadDocument } from '../leads/schemas/lead.schema';
 import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
@@ -73,6 +82,7 @@ export class CalendarService {
     private readonly activity: ActivityService,
     private readonly googleMeet: GoogleMeetService,
     private readonly mail: MailService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /**
@@ -302,6 +312,20 @@ export class CalendarService {
       participants,
     }).save();
 
+    // Notify the assignee when an appointment is booked FOR them by someone
+    // else (self-booked events don't self-notify — the actor is excluded).
+    if (assignedToId && String(assignedToId) !== String(actorId ?? '')) {
+      this.events.emit(NotificationEvent.APPOINTMENT_BOOKED, {
+        eventId: String(saved._id),
+        assigneeId: String(assignedToId),
+        actorId,
+        eventLabel: labelFor(saved.eventType),
+        title: saved.title,
+        customerName: saved.customerName,
+        startISO: new Date(saved.startDateTime).toISOString(),
+      } as AppointmentBookedEvent);
+    }
+
     try {
       await this.activity.log({
         module: 'calendar',
@@ -346,6 +370,54 @@ export class CalendarService {
     });
 
     return saved;
+  }
+
+  /** How far ahead we remind before an appointment starts. */
+  private static readonly REMINDER_LEAD_MINUTES = 60;
+
+  /**
+   * Notify assignees of appointments starting within the next hour. Runs every
+   * 15 min; each event reminds AT MOST once (guarded by `reminderSentAt`), and
+   * only scheduled (non-cancelled) events with an assignee qualify. Returns the
+   * number of reminders sent. Also callable via POST /calendar/reminders/run
+   * (ops + smoke test).
+   */
+  async sendDueAppointmentReminders(now: Date = new Date()): Promise<number> {
+    const windowEnd = new Date(now.getTime() + CalendarService.REMINDER_LEAD_MINUTES * 60_000);
+    const due = await this.model.find({
+      isDeleted: false,
+      status: EventStatus.SCHEDULED,
+      reminderSentAt: null,
+      assignedTo: { $ne: null },
+      startDateTime: { $gte: now, $lte: windowEnd },
+    });
+    let sent = 0;
+    for (const ev of due) {
+      // Mark first so a slow emit can't double-send on an overlapping run.
+      await this.model.updateOne({ _id: ev._id }, { $set: { reminderSentAt: now } });
+      this.events.emit(NotificationEvent.APPOINTMENT_REMINDER, {
+        eventId: String(ev._id),
+        assigneeId: String(ev.assignedTo),
+        eventLabel: labelFor(ev.eventType),
+        title: ev.title,
+        customerName: ev.customerName,
+        startISO: new Date(ev.startDateTime).toISOString(),
+      } as AppointmentReminderEvent);
+      sent += 1;
+    }
+    if (sent) this.logger.log(`appointment reminders sent: ${sent}`);
+    return sent;
+  }
+
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async cronAppointmentReminders(): Promise<void> {
+    try {
+      await this.sendDueAppointmentReminders();
+    } catch (err) {
+      this.logger.error(
+        `appointment reminder cron failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   async findAll(query: any): Promise<PaginatedResult<CalendarEventDocument>> {
@@ -516,6 +588,29 @@ export class CalendarService {
     );
     if (!event) throw new NotFoundException('Event not found');
 
+    // Notify the assignee when a booked appointment's timing/type changes or it
+    // is cancelled via a status flip. Skips trivial edits and self-edits (the
+    // actor is excluded downstream).
+    const upAssignee = event.assignedTo ? String(event.assignedTo) : '';
+    if (upAssignee && upAssignee !== String(actorId ?? '')) {
+      const base = {
+        eventId: String(event._id),
+        assigneeId: upAssignee,
+        actorId,
+        eventLabel: labelFor(event.eventType),
+        title: event.title,
+        startISO: new Date(event.startDateTime).toISOString(),
+      };
+      if (dto.status === EventStatus.CANCELLED && existing.status !== EventStatus.CANCELLED) {
+        this.events.emit(NotificationEvent.APPOINTMENT_CANCELLED, base as AppointmentChangedEvent);
+      } else if (dto.startDateTime || dto.endDateTime || dto.meetingType) {
+        this.events.emit(NotificationEvent.APPOINTMENT_UPDATED, {
+          ...base,
+          change: dto.startDateTime || dto.endDateTime ? 'New time' : 'Meeting type changed',
+        } as AppointmentChangedEvent);
+      }
+    }
+
     try {
       await this.activity.log({
         module: 'calendar',
@@ -633,6 +728,20 @@ export class CalendarService {
       { new: false },
     );
     if (!event) throw new NotFoundException('Event not found');
+
+    // Notify the assignee that their appointment was cancelled (unless they did
+    // it themselves — the actor is excluded downstream).
+    const rmAssignee = event.assignedTo ? String(event.assignedTo) : '';
+    if (rmAssignee && rmAssignee !== String(actorId ?? '')) {
+      this.events.emit(NotificationEvent.APPOINTMENT_CANCELLED, {
+        eventId: String(event._id),
+        assigneeId: rmAssignee,
+        actorId,
+        eventLabel: labelFor(event.eventType),
+        title: event.title,
+        startISO: new Date(event.startDateTime).toISOString(),
+      } as AppointmentChangedEvent);
+    }
 
     // Cancel the backing Google Calendar event (best-effort) so the Meet room
     // and any sent invites don't outlive the CDMS event.

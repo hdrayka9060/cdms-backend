@@ -16,6 +16,7 @@ import { CalendarEvent, CalendarEventDocument } from '../calendar/schemas/calend
 import { CommunicationLog, CommunicationLogDocument } from '../communication/schemas/communication-log.schema';
 import { AccountingService } from '../accounting/accounting.service';
 import { CrmBuyersService } from '../crm-buyers/crm-buyers.service';
+import { BhphService } from '../bhph/bhph.service';
 import { ActivityService } from '../activity/activity.service';
 import { VinDecodeService, DecodedVehicleFields } from './vin-decode.service';
 import { StorageService } from '../../common/storage/storage.service';
@@ -57,6 +58,7 @@ export class InventoryService implements OnModuleInit {
     // would deadlock without it.
     @Inject(forwardRef(() => AccountingService)) private accountingService: AccountingService,
     private readonly crmBuyersService: CrmBuyersService,
+    private readonly bhphService: BhphService,
     private readonly activity: ActivityService,
     private readonly vinDecode: VinDecodeService,
     private readonly storage: StorageService,
@@ -148,6 +150,27 @@ export class InventoryService implements OnModuleInit {
     //     (the Sale schema requires buyerName/buyerEmail).
     const buyerName = (dto.buyerName ?? '').trim();
     const buyerEmail = (dto.buyerEmail ?? '').trim();
+    const isBhph = dto.paymentMethod === 'bhph';
+    // BHPH net (financed) price folds any discount into the agreed price so the
+    // loan's salePrice == the sale's salePrice (BHPH sales carry no discount).
+    const bhphNet = Math.max(0, (Number(dto.salePrice) || 0) - (Number(dto.discount) || 0));
+
+    // Validate BHPH inputs up-front (before creating the sale) so a bad request
+    // can't leave an orphan sale. A BHPH sale needs a real buyer + down payment
+    // + a solvable EMI trio.
+    if (isBhph) {
+      if (!dto.buyerLeadId && !buyerEmail) {
+        throw new BadRequestException('A buyer (existing, or new with email + phone) is required for a BHPH sale.');
+      }
+      if (!(Number(dto.amountPaid) > 0)) {
+        throw new BadRequestException('A down payment (amount paid) is required for a BHPH sale.');
+      }
+      this.bhphService.previewEmi({
+        salePrice: bhphNet, downPayment: dto.amountPaid,
+        interestRatePercent: dto.interestRatePercent, termMonths: dto.termMonths, emiAmount: dto.emiAmount,
+      });
+    }
+
     let buyerLeadId = dto.buyerLeadId;
     if (!buyerLeadId && buyerEmail) {
       const phone = (dto.buyerPhone ?? '').trim();
@@ -178,14 +201,16 @@ export class InventoryService implements OnModuleInit {
 
     // Delegate to the single source of truth. Its own guard also rejects a
     // duplicate (409) if a non-deleted Sale already exists for this vehicle.
-    return this.accountingService.createSale({
+    // For BHPH the discount is folded into the price (bhphNet) with discount 0
+    // so the loan's salePrice stays in lockstep with the sale's.
+    const sale = await this.accountingService.createSale({
       vehicleId: id,
       vehicleTitle: (vehicle as any).title,
       buyerName: buyerName || 'Walk-in',
       buyerEmail: buyerEmail || '—',
-      salePrice: dto.salePrice,
+      salePrice: isBhph ? bhphNet : dto.salePrice,
       costPrice: (vehicle as any).costPrice ?? 0, // server-sourced, tamper-proof
-      discount: dto.discount ?? 0,
+      discount: isBhph ? 0 : (dto.discount ?? 0),
       amountPaid: dto.amountPaid,
       saleDate: dto.saleDate,
       paymentMethod: dto.paymentMethod ?? 'cash',
@@ -195,6 +220,56 @@ export class InventoryService implements OnModuleInit {
       leadId: String(lead._id),
       actorName,
     });
+
+    // BHPH: create the financing loan linked to the just-created sale. The
+    // walk-in lead (with its buyer) supplies borrower + vehicle resolution.
+    if (isBhph) {
+      await this.bhphService.create({
+        saleId: String((sale as any)._id),
+        leadId: String(lead._id),
+        buyerLeadId,
+        vehicle: id,
+        vehicleTitle: (vehicle as any).title,
+        salePrice: bhphNet,
+        downPayment: dto.amountPaid,
+        interestRatePercent: dto.interestRatePercent,
+        termMonths: dto.termMonths,
+        emiAmount: dto.emiAmount,
+        startDate: dto.saleDate,
+      });
+    }
+
+    return sale;
+  }
+
+  /**
+   * Reverse a sale — put the car back on the lot. Archives any linked BHPH loan
+   * (income backed out) + open-balance receivable, soft-deletes the Sale, pulls
+   * the buyer's purchase, archives the originating closed lead, and clears the
+   * vehicle's sold flags. Best-effort cascade; the vehicle flip is the primary.
+   */
+  async markUnsold(id: string, actorName?: string): Promise<any> {
+    if (!isValidObjectId(id)) throw new BadRequestException('Invalid vehicle id');
+    const vehicle = await this.vehicleModel.findOne({ _id: id, isDeleted: false }).lean();
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    if ((vehicle as any).status !== VehicleStatus.SOLD) {
+      throw new BadRequestException('This vehicle is not marked as sold.');
+    }
+    // 1. Archive linked BHPH loans (removes their interest income).
+    await this.bhphService.archiveLoansForVehicle(id);
+    // 2. Reverse the sale: soft-delete Sale + pull buyer purchase + archive
+    //    receivable(s) + archive the closed lead.
+    await this.accountingService.cleanupSoldArtifacts(id, { archiveLeads: true });
+    // 3. Put the car back on the lot.
+    await this.vehicleModel.updateOne(
+      { _id: id, isDeleted: false },
+      { $set: { status: VehicleStatus.NONE }, $unset: { soldAt: '', soldDate: '' } },
+    );
+    await this.activity.log({
+      module: 'inventory', action: 'unsold', entity: 'Vehicle', entityId: id,
+      label: `${(vehicle as any).title} marked unsold — sale reversed`, byName: actorName,
+    });
+    return this.vehicleModel.findOne({ _id: id }).lean();
   }
 
   /**

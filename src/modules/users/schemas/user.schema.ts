@@ -74,6 +74,16 @@ export class User {
   @ApiProperty() @Prop({ default: '' }) avatar: string;
   @ApiProperty() @Prop({ default: '' }) department: string;
 
+  /**
+   * Per-user notification preferences, keyed by NotificationCategory
+   * (leads/appointments/sales/social/support/system) → { inApp, email }.
+   * Read by NotificationsService before writing/emailing/pushing. Missing keys
+   * default to { inApp: true, email: true, push: true }, so an empty map =
+   * "notify me everywhere".
+   */
+  @Prop({ type: Object, default: {} })
+  notificationPrefs?: Record<string, { inApp?: boolean; email?: boolean; push?: boolean }>;
+
   // Refresh token hash stored for invalidation
   @Prop({ select: false }) refreshToken: string;
 

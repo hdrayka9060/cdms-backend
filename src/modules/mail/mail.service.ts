@@ -1,8 +1,10 @@
 import { Injectable, Logger, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import * as nodemailer from 'nodemailer';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import { auth as googleAuth, gmail as googleGmail, type gmail_v1 } from '@googleapis/gmail';
+import { NotificationEvent, MailFailedEvent } from '../notifications/notification-events';
 
 /**
  * Thrown when `send({ throwOnFailure: true })` was requested AND the SMTP
@@ -51,7 +53,10 @@ export class MailService implements OnModuleInit {
   private transport: 'gmail' | 'smtp' | 'dev' = 'dev';
   private fromAddress = 'CDMS <noreply@cdms.com>';
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly events: EventEmitter2,
+  ) {}
 
   onModuleInit() {
     // MAIL_FROM sometimes arrives wrapped in literal quotes (e.g. Render env
@@ -320,6 +325,29 @@ export class MailService implements OnModuleInit {
   }
 
   /**
+   * Generic notification email for high-value in-app notification types
+   * (e.g. a lead assigned to you). Reuses the branded shell. Called
+   * best-effort by NotificationsService — a failure is swallowed by `send`.
+   */
+  async sendNotification(opts: {
+    to: string;
+    title: string;
+    body?: string;
+    link?: string;
+  }): Promise<void> {
+    if (!opts.to) return;
+    const bodyHtml = `
+      ${eyebrow('Notification')}
+      <h1 style="margin:0 0 12px;font-size:20px;line-height:1.3;color:#0f172a;">${escapeHtml(opts.title)}</h1>
+      ${opts.body ? `<p style="margin:0 0 8px;">${escapeHtml(opts.body)}</p>` : ''}
+      ${opts.link ? emailButton(opts.link, 'Open in CDMS') : ''}
+      ${opts.link ? linkFallback(opts.link) : ''}`;
+    const html = emailShell({ title: opts.title, preheader: opts.body, bodyHtml });
+    const text = [opts.title, opts.body ?? '', opts.link ?? ''].filter(Boolean).join('\n\n');
+    await this.send({ to: opts.to, subject: opts.title, html, text, contextTag: 'notification' });
+  }
+
+  /**
    * Single send path.
    *
    * Default behaviour: swallow + warn (mail must never break a domain op).
@@ -364,6 +392,15 @@ export class MailService implements OnModuleInit {
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.logger.warn(`📧 mail/${opts.contextTag} FAILED to=${opts.to}: ${reason}`);
+      // Ops alert: a REAL send failed. Skip the 'notification' context so a
+      // failed notification-email can't spawn another notification (no loop).
+      if (opts.contextTag !== 'notification') {
+        this.events.emit(NotificationEvent.MAIL_FAILED, {
+          contextTag: opts.contextTag,
+          to: opts.to,
+          reason,
+        } as MailFailedEvent);
+      }
       if (opts.throwOnFailure) {
         throw new MailDeliveryError(reason);
       }

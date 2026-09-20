@@ -129,6 +129,16 @@ export class MarkSoldDto {
   @IsOptional() @IsString() buyerLeadId?: string;
   @ApiPropertyOptional({ description: 'Free-text sale notes.' })
   @IsOptional() @IsString() notes?: string;
+
+  // ── BHPH financing (used only when paymentMethod = 'bhph') ──
+  // amountPaid is the down payment; the rest is financed. Supply any two of
+  // interestRatePercent / termMonths / emiAmount — the loan solves the third.
+  @ApiPropertyOptional({ description: 'BHPH annual interest %.' })
+  @IsOptional() @IsNumber() @Min(0) @Max(100) interestRatePercent?: number;
+  @ApiPropertyOptional({ description: 'BHPH term in months.' })
+  @IsOptional() @IsInt() @Min(1) termMonths?: number;
+  @ApiPropertyOptional({ description: 'BHPH monthly EMI.' })
+  @IsOptional() @IsNumber() @Min(0) emiAmount?: number;
 }
 
 export class VehicleQueryDto extends PaginationDto {

@@ -3,6 +3,7 @@ import { Document } from 'mongoose';
 
 export type SaleDocument = Sale & Document;
 export type ExpenseDocument = Expense & Document;
+export type IncomeDocument = Income & Document;
 
 @Schema({ timestamps: true, collection: 'sales' })
 export class Sale {
@@ -58,7 +59,35 @@ export class Expense {
   createdAt: Date;
 }
 
+/**
+ * Income ledger — non-sale revenue recognized as it is collected. Currently
+ * only BHPH financing interest (category 'interest', source 'bhph-interest'),
+ * but modelled generically. Rows are DERIVED + managed exclusively by
+ * BhphService via AccountingService (one row per interest-bearing payment,
+ * keyed by loanId + paymentId) — never authored directly. Folded into
+ * AccountingService.getSummary / getProfitLoss and the Dashboard so revenue +
+ * profit reflect interest earned. Reversed (deleted) when a payment is
+ * removed/edited or the loan is archived.
+ */
+@Schema({ timestamps: true, collection: 'incomes' })
+export class Income {
+  @Prop({ required: true }) title: string;
+  @Prop({ required: true }) amount: number;
+  @Prop({ required: true }) date: Date;
+  @Prop({ default: 'interest', enum: ['interest', 'other'] }) category: string;
+  /** Provenance for derived rows, e.g. 'bhph-interest'. */
+  @Prop() source?: string;
+  /** Owning BHPH loan (ObjectId hex). Reversal key on loan archive. */
+  @Prop({ index: true }) loanId?: string;
+  /** The specific loan payment this interest was collected on. */
+  @Prop({ index: true }) paymentId?: string;
+  @Prop({ default: false }) isDeleted: boolean;
+  createdAt: Date;
+}
+
 export const SaleSchema = SchemaFactory.createForClass(Sale);
 export const ExpenseSchema = SchemaFactory.createForClass(Expense);
+export const IncomeSchema = SchemaFactory.createForClass(Income);
 SaleSchema.index({ saleDate: -1, paymentStatus: 1 });
 ExpenseSchema.index({ date: -1, category: 1 });
+IncomeSchema.index({ date: -1, category: 1 });

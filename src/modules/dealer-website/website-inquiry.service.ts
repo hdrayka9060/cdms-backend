@@ -6,6 +6,8 @@ import { BuyerLead, BuyerLeadDocument, BuyerLeadStage } from '../crm-buyers/sche
 import { Lead, LeadChannel, LeadDocument, LeadSource, LeadStatus } from '../leads/schemas/lead.schema';
 import { Vehicle, VehicleDocument } from '../inventory/schemas/vehicle.schema';
 import { MailService } from '../mail/mail.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { NotificationEvent, LeadWebsiteCreatedEvent } from '../notifications/notification-events';
 import { InquiryFormType, WebsiteInquiryDto } from './dto/website-inquiry.dto';
 
 const FORM_LABEL: Record<InquiryFormType, string> = {
@@ -35,6 +37,7 @@ export class WebsiteInquiryService {
     @InjectModel(Vehicle.name) private readonly vehicleModel: Model<VehicleDocument>,
     private readonly mailService: MailService,
     private readonly config: ConfigService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /**
@@ -149,7 +152,7 @@ export class WebsiteInquiryService {
             ? `Lead created from website (${FORM_LABEL[dto.formType]}) — archived: vehicle already sold`
             : `Lead created from website (${FORM_LABEL[dto.formType]})`;
           try {
-            await new this.leadModel({
+            const createdLead = await new this.leadModel({
               buyer: new Types.ObjectId(String(buyer._id)),
               vehicle: vehObj,
               source: LeadSource.WEBSITE,
@@ -176,6 +179,16 @@ export class WebsiteInquiryService {
               { _id: buyer._id },
               { $addToSet: { interestedVehicles: vehObj } },
             );
+            // Notify the sales team of a genuine new (active) website lead.
+            // Skip archived (sold-vehicle) captures — those aren't actionable.
+            if (!isSold) {
+              this.events.emit(NotificationEvent.LEAD_WEBSITE_CREATED, {
+                leadId: String(createdLead._id),
+                buyerName: name,
+                vehicleTitle: vehicleOfInterest || undefined,
+                formLabel: FORM_LABEL[dto.formType],
+              } as LeadWebsiteCreatedEvent);
+            }
           } catch (err: any) {
             // Duplicate {buyer, vehicle} lead (compound unique index) → already inquired; ignore.
             if (err?.code !== 11000) {

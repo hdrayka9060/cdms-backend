@@ -4,12 +4,15 @@ import { Model } from 'mongoose';
 import { Ticket, TicketDocument, TicketStatus } from './schemas/ticket.schema';
 import { PaginatedResult } from '../../common/dto/pagination.dto';
 import { ActivityService } from '../activity/activity.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { NotificationEvent, SupportTicketCreatedEvent } from '../notifications/notification-events';
 
 @Injectable()
 export class SupportService {
   constructor(
     @InjectModel(Ticket.name) private model: Model<TicketDocument>,
     private readonly activity: ActivityService,
+    private readonly events: EventEmitter2,
   ) {}
 
   async create(dto: any): Promise<TicketDocument> {
@@ -22,6 +25,13 @@ export class SupportService {
       label: `${saved.subject} (${saved.raisedByName})`,
       meta: { priority: saved.priority, status: saved.status },
     });
+    // Alert support staff of the new ticket.
+    this.events.emit(NotificationEvent.SUPPORT_TICKET_CREATED, {
+      ticketId: String(saved._id),
+      subject: saved.subject,
+      raisedByName: saved.raisedByName,
+      priority: saved.priority,
+    } as SupportTicketCreatedEvent);
     return saved;
   }
 

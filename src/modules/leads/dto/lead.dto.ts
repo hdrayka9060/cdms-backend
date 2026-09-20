@@ -1,6 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
-  IsDateString, IsEnum, IsMongoId, IsNotEmpty, IsNumber, IsOptional, IsString, Min,
+  IsDateString, IsEnum, IsInt, IsMongoId, IsNotEmpty, IsNumber, IsOptional, IsString, Max, Min,
 } from 'class-validator';
 import { LeadChannel, LeadSource, LeadStatus } from '../schemas/lead.schema';
 import { PaginationDto } from '../../../common/dto/pagination.dto';
@@ -153,6 +153,16 @@ export class CloseLeadDto {
   @IsOptional() @IsDateString() saleDate?: string;
 
   @ApiPropertyOptional() @IsOptional() @IsString() notes?: string;
+
+  // ── BHPH financing (used only when paymentMethod = 'bhph') ──
+  // amountPaid above is the down payment; the rest is financed. Supply any two
+  // of interestRatePercent / termMonths / emiAmount — the loan solves the third.
+  @ApiPropertyOptional({ description: 'BHPH annual interest %.' })
+  @IsOptional() @IsNumber() @Min(0) @Max(100) interestRatePercent?: number;
+  @ApiPropertyOptional({ description: 'BHPH term in months.' })
+  @IsOptional() @IsInt() @Min(1) termMonths?: number;
+  @ApiPropertyOptional({ description: 'BHPH monthly EMI.' })
+  @IsOptional() @IsNumber() @Min(0) emiAmount?: number;
 }
 
 export class LeadQueryDto extends PaginationDto {

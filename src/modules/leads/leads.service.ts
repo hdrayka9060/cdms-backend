@@ -20,7 +20,17 @@ import { Vehicle, VehicleDocument, VehicleStatus } from '../inventory/schemas/ve
 import { BuyerLead, BuyerLeadDocument } from '../crm-buyers/schemas/buyer-lead.schema';
 import { AccountingService } from '../accounting/accounting.service';
 import { CrmBuyersService } from '../crm-buyers/crm-buyers.service';
+import { BhphService } from '../bhph/bhph.service';
 import { ActivityService } from '../activity/activity.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import {
+  NotificationEvent,
+  LeadAssignedEvent,
+  LeadCreatedEvent,
+  LeadNegotiationEvent,
+  LeadStaleEvent,
+} from '../notifications/notification-events';
 
 /**
  * What vehicle status should reflect, given a lead's new status.
@@ -48,7 +58,9 @@ export class LeadsService {
     @InjectModel(BuyerLead.name) private readonly buyerModel: Model<BuyerLeadDocument>,
     @Inject(forwardRef(() => AccountingService)) private readonly accountingService: AccountingService,
     private readonly crmBuyersService: CrmBuyersService,
+    private readonly bhphService: BhphService,
     private readonly activity: ActivityService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /**
@@ -280,6 +292,21 @@ export class LeadsService {
       });
     }
 
+    // Notify everyone who can view Leads (the sales team + the assignee),
+    // excluding the creator. Skipped when closing-on-create — that path already
+    // emits SALE_RECORDED, so a "new lead" ping would be redundant/confusing.
+    if (!closingOnCreate) {
+      this.events.emit(NotificationEvent.LEAD_CREATED, {
+        leadId: String(lead._id),
+        buyerName: b?.buyerName,
+        vehicleTitle: v?.title,
+        assigneeId: assignedTo ? String(assignedTo) : undefined,
+        actorId,
+        actorName: userId,
+        source: dto.source,
+      } as LeadCreatedEvent);
+    }
+
     // Mirror the inquiry onto the buyer's CRM record so the vehicle shows up
     // under "Vehicles Interested" on the buyer detail page. Skipped for walk-in
     // (no buyer). $addToSet keeps it idempotent. Best-effort — a sync failure
@@ -438,7 +465,67 @@ export class LeadsService {
     return this.hydrateLog(lead);
   }
 
-  async update(id: string, dto: UpdateLeadDto, userId: string): Promise<any> {
+  /** Open pipeline statuses (a lead the rep is still meant to be working). */
+  private static readonly OPEN_STATUSES = [
+    LeadStatus.NEW,
+    LeadStatus.CONTACTED,
+    LeadStatus.TEST_DRIVE,
+    LeadStatus.NEGOTIATION,
+  ];
+  private static readonly STALE_DAYS = 5;
+
+  /**
+   * Nudge reps about open, assigned leads that have gone quiet (no update for
+   * `maxIdleDays`). Reminds each lead at most once per idle window (guarded by
+   * `staleReminderAt`). Runs daily; also callable via POST /leads/reminders/run
+   * (ops), which accepts `maxIdleDays` and an optional `leadId` to scope a
+   * single-lead nudge. Returns the number of reminders sent.
+   */
+  async sendStaleLeadReminders(opts: { maxIdleDays?: number; leadId?: string; now?: Date } = {}): Promise<number> {
+    const now = opts.now ?? new Date();
+    const maxIdleDays = opts.maxIdleDays ?? LeadsService.STALE_DAYS;
+    const cutoff = new Date(now.getTime() - maxIdleDays * 86_400_000);
+
+    const filter: FilterQuery<LeadDocument> = {
+      isDeleted: false,
+      status: { $in: LeadsService.OPEN_STATUSES },
+      assignedTo: { $ne: null },
+      updatedAt: { $lte: cutoff },
+      $or: [{ staleReminderAt: null }, { staleReminderAt: { $lte: cutoff } }],
+    };
+    if (opts.leadId && isValidObjectId(opts.leadId)) filter._id = new Types.ObjectId(opts.leadId);
+
+    const stale = await this.model
+      .find(filter)
+      .populate('vehicle', 'title')
+      .populate('buyer', 'buyerName');
+    let sent = 0;
+    for (const lead of stale) {
+      await this.model.updateOne({ _id: lead._id }, { $set: { staleReminderAt: now } });
+      const idleDays = Math.max(0, Math.floor((now.getTime() - new Date(lead.updatedAt).getTime()) / 86_400_000));
+      this.events.emit(NotificationEvent.LEAD_STALE, {
+        leadId: String(lead._id),
+        assigneeId: String(lead.assignedTo),
+        buyerName: (lead.buyer as any)?.buyerName,
+        vehicleTitle: (lead.vehicle as any)?.title,
+        idleDays,
+      } as LeadStaleEvent);
+      sent += 1;
+    }
+    if (sent) this.logger.log(`stale-lead reminders sent: ${sent}`);
+    return sent;
+  }
+
+  @Cron(CronExpression.EVERY_DAY_AT_9AM)
+  async cronStaleLeads(): Promise<void> {
+    try {
+      await this.sendStaleLeadReminders();
+    } catch (err) {
+      this.logger.error(`stale-lead cron failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  async update(id: string, dto: UpdateLeadDto, userId: string, actorId?: string): Promise<any> {
     if (!isValidObjectId(id)) throw new BadRequestException('Invalid lead id');
     const existing = await this.model.findOne({ _id: id, isDeleted: false });
     if (!existing) throw new NotFoundException('Lead not found');
@@ -539,6 +626,18 @@ export class LeadsService {
     );
     if (!lead) throw new NotFoundException('Lead not found');
 
+    // Notify the new owner when the lead was (re)assigned to someone else.
+    // Fire-and-forget on the event bus; the NotificationsListener excludes the
+    // actor, so a self-assignment produces no notification.
+    if (dto.assignedTo && String(existing.assignedTo ?? '') !== String(dto.assignedTo)) {
+      this.events.emit(NotificationEvent.LEAD_ASSIGNED, {
+        leadId: String(lead._id),
+        assigneeId: String(dto.assignedTo),
+        actorId,
+        actorName: userId,
+      } as LeadAssignedEvent);
+    }
+
     // Log every PATCH — status flips, asked-price tweaks, reassignments all
     // appear in the activity feed so the dashboard reflects pipeline progress.
     if (effectiveStatus && effectiveStatus !== existing.status) {
@@ -561,6 +660,19 @@ export class LeadsService {
         byName: userId,
         meta: { askedPrice: dto.askedPrice },
       });
+    }
+
+    // Lead entered Negotiation → alert the rep + sales managers (in-app).
+    if (
+      effectiveStatus === LeadStatus.NEGOTIATION &&
+      existing.status !== LeadStatus.NEGOTIATION
+    ) {
+      this.events.emit(NotificationEvent.LEAD_NEGOTIATION, {
+        leadId: String(lead._id),
+        assigneeId: lead.assignedTo ? String(lead.assignedTo) : undefined,
+        actorId,
+        actorName: userId,
+      } as LeadNegotiationEvent);
     }
 
     // Closed → anything else: the dealer is reversing the sale via the lead.
@@ -865,11 +977,25 @@ export class LeadsService {
     if (!vehicle || typeof vehicle === 'string') throw new BadRequestException('Lead vehicle is not populated');
 
     const saleDate = dto.saleDate ? new Date(dto.saleDate) : new Date();
+    const isBhph = dto.paymentMethod === 'bhph';
+
+    // Validate BHPH inputs BEFORE creating the sale so a bad request can't
+    // orphan a sale without its loan. The down payment (amountPaid) is required,
+    // and the EMI trio must be solvable (any two of rate/term/EMI).
+    if (isBhph) {
+      if (!(Number(dto.amountPaid) > 0)) {
+        throw new BadRequestException('A down payment (amount paid) is required for a BHPH sale.');
+      }
+      this.bhphService.previewEmi({
+        salePrice: dto.soldAt, downPayment: dto.amountPaid,
+        interestRatePercent: dto.interestRatePercent, termMonths: dto.termMonths, emiAmount: dto.emiAmount,
+      });
+    }
 
     // Delegate to the unified createSale — it handles the sale + vehicle
     // status/soldAt/soldDate + buyer purchase push + lead close + timeline
     // all in one place, so this orchestration stays a thin wrapper.
-    await this.accountingService.createSale({
+    const sale = await this.accountingService.createSale({
       vehicleId: String(vehicle._id),
       vehicleTitle: vehicle.title,
       buyerName: buyer.buyerName,
@@ -886,6 +1012,26 @@ export class LeadsService {
       leadId: String(lead._id),
       actorName: userId,
     });
+
+    // BHPH: create the financing loan linked to the just-created sale.
+    if (isBhph) {
+      await this.bhphService.create({
+        saleId: String(sale._id),
+        leadId: String(lead._id),
+        buyerLeadId: String(buyer._id),
+        vehicle: String(vehicle._id),
+        vehicleTitle: vehicle.title,
+        borrowerName: buyer.buyerName,
+        borrowerEmail: buyer.buyerEmail,
+        borrowerPhone: buyer.buyerPhone,
+        salePrice: dto.soldAt,
+        downPayment: dto.amountPaid,
+        interestRatePercent: dto.interestRatePercent,
+        termMonths: dto.termMonths,
+        emiAmount: dto.emiAmount,
+        startDate: saleDate,
+      });
+    }
 
     await this.activity.log({
       module: 'leads',

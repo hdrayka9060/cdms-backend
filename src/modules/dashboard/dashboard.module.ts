@@ -5,7 +5,7 @@ import { DashboardService } from './dashboard.service';
 import { Vehicle, VehicleSchema } from '../inventory/schemas/vehicle.schema';
 import { SellerLead, SellerLeadSchema } from '../crm-sellers/schemas/seller-lead.schema';
 import { BuyerLead, BuyerLeadSchema } from '../crm-buyers/schemas/buyer-lead.schema';
-import { Sale, SaleSchema, Expense, ExpenseSchema } from '../accounting/schemas/accounting.schema';
+import { Sale, SaleSchema, Expense, ExpenseSchema, Income, IncomeSchema } from '../accounting/schemas/accounting.schema';
 import { CalendarEvent, CalendarEventSchema } from '../calendar/schemas/calendar-event.schema';
 import { Lead, LeadSchema } from '../leads/schemas/lead.schema';
 
@@ -19,6 +19,8 @@ import { Lead, LeadSchema } from '../leads/schemas/lead.schema';
       // Expenses drive the Monthly Expenses bar chart; Leads drive the
       // Active Leads KPI when filtered by date range.
       { name: Expense.name, schema: ExpenseSchema },
+      // Income (BHPH interest) folds into the revenue/profit KPIs.
+      { name: Income.name, schema: IncomeSchema },
       { name: CalendarEvent.name, schema: CalendarEventSchema },
       { name: Lead.name, schema: LeadSchema },
     ]),

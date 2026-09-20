@@ -24,6 +24,8 @@ import { AdAccountSummary, AdInsightRow } from '../ads-api/ads-api.types';
 import { ActivityService } from '../activity/activity.service';
 import { decryptToken, encryptToken } from '../../common/crypto/token-cipher';
 import { ConnectCallbackDto, UpdateAdsConnectionDto } from './dto/ads.dto';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { NotificationEvent, AdsSyncFailedEvent } from '../notifications/notification-events';
 
 /** A metric accumulator (the five raw sums; derived ratios added on read).
  *  Exported so the inferred analytics return type is nameable across modules. */
@@ -58,6 +60,7 @@ export class AdsAnalyticsService {
     private readonly meta: MetaAdsApiService,
     private readonly activity: ActivityService,
     private readonly config: ConfigService,
+    private readonly events: EventEmitter2,
   ) {}
 
   // ── Connections ────────────────────────────────────────────────────────────
@@ -339,9 +342,19 @@ export class AdsAnalyticsService {
       try {
         total += await this.syncConnection(String(c._id), actorId);
       } catch (err) {
-        this.logger.error(
-          `Ads sync failed for ${c.provider} (${c._id}): ${err instanceof Error ? err.message : err}`,
-        );
+        const reason = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Ads sync failed for ${c.provider} (${c._id}): ${reason}`);
+        // Notify marketing/ops only on the healthy→failing transition (c.lastError
+        // reflects the state BEFORE this attempt) so a persistently-broken
+        // connection doesn't re-alert every 6h cron.
+        if (!c.lastError) {
+          this.events.emit(NotificationEvent.ADS_SYNC_FAILED, {
+            provider: c.provider,
+            connectionId: String(c._id),
+            accountName: c.accountName || c.accountId,
+            reason,
+          } as AdsSyncFailedEvent);
+        }
       }
     }
     return total;

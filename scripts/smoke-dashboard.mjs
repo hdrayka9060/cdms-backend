@@ -27,15 +27,28 @@ const sales = db.collection('sales');
 const expenses = db.collection('expenses');
 const leads = db.collection('leads');
 
+// Live dashboard endpoint (no range = all-time). We assert the endpoint's KPIs
+// equal the DB-derived counts — a drift-proof invariant that actually exercises
+// the running dashboard.service, instead of comparing the DB to a frozen number
+// that goes stale as the demo data grows.
+const BASE = 'http://localhost:3000/api/v1';
+const login = await fetch(`${BASE}/auth/login`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ email: 'marcus.bennett@mapleleafmotors.ca', password: 'Welcome@123' }),
+});
+const token = (await login.json())?.data?.accessToken;
+const statsRes = await fetch(`${BASE}/dashboard/stats`, { headers: { Authorization: `Bearer ${token}` } });
+const stats = (await statsRes.json())?.data?.current ?? {};
+
 // ── 1. Stock counts (NEW dashboard behaviour) ──────────────────────────────
 const allVehicles = await vehicles.countDocuments({ isDeleted: false });
 const soldVehicles = await vehicles.countDocuments({ isDeleted: false, status: 'sold' });
 const liveSales = await sales.countDocuments({ isDeleted: false });
 const activeLeads = await leads.countDocuments({ isDeleted: false, status: { $nin: ['closed', 'archived'] } });
 
-console.log('\n=== Stock counts (what the NEW dashboard shows) ===');
-check('totalVehicles = all non-deleted', allVehicles, 55);
-check('vehiclesSold = status:sold non-deleted', soldVehicles, 28);
+console.log('\n=== Stock counts (dashboard endpoint == DB, all-time) ===');
+check('dashboard.totalVehicles == DB all non-deleted', stats.totalVehicles, allVehicles);
+check('dashboard.vehiclesSold == DB status:sold non-deleted', stats.vehiclesSold, soldVehicles);
 console.log(`  INFO  live sales rows = ${liveSales} (was counted before; drift vs sold vehicles = ${liveSales - soldVehicles})`);
 console.log(`  INFO  activeLeads (un-windowed) = ${activeLeads}`);
 
