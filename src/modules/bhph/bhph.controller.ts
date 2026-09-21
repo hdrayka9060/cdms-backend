@@ -8,7 +8,7 @@ import { AppModule, PermissionAction } from '../../common/permissions';
 import { LoanStatus } from './schemas/loan.schema';
 import { PaginationDto } from '../../common/dto/pagination.dto';
 import {
-  BulkMarkPaidDto, CreateLoanDto, LoanQueryDto, PreviewEmiDto, RecordPaymentDto, UpdateLoanDto, UpdatePaymentDto,
+  BulkMarkPaidDto, CloseLoanDto, CreateLoanDto, LoanQueryDto, PreviewEmiDto, RecordPaymentDto, UpdateLoanDto, UpdatePaymentDto,
 } from './dto/loan.dto';
 
 @ApiTags('BHPH')
@@ -162,10 +162,16 @@ export class BhphController {
 
   @Post('loans/:id/close')
   @RequirePermission(AppModule.BHPH, PermissionAction.EDIT)
-  @ApiOperation({ summary: 'Close a loan', description: 'Early settlement / write-off. Stops reminders; the sale + interest income stay booked.' })
+  @ApiOperation({
+    summary: 'Close a loan',
+    description:
+      "outcome 'payoff' → settle remaining principal (future interest waived) + optional earlyClosureFee, status paid_off; " +
+      "outcome 'defaulted' → keep collected money, stop reminders, status defaulted; " +
+      'otherwise → legacy close (sale + interest kept booked).',
+  })
   @ApiParam({ name: 'id' })
-  async close(@Param('id') id: string) {
-    const loan = await this.service.close(id);
+  async close(@Param('id') id: string, @Body() dto: CloseLoanDto) {
+    const loan = await this.service.close(id, dto);
     return { message: 'Loan closed', data: loan };
   }
 

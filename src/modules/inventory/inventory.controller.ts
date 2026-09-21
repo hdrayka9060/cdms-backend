@@ -144,6 +144,34 @@ export class InventoryController {
     return { message: 'Sold buyer', data };
   }
 
+  @Get(':id/payment-info')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.VIEW)
+  @ApiOperation({
+    summary: "A sold vehicle's payment picture",
+    description: 'Returns { vehicleStatus, sale, loan, receivable, leads } — the BHPH loan / receivable / partial details plus linked leads.',
+  })
+  @ApiParam({ name: 'id', description: 'Vehicle ObjectId' })
+  async getPaymentInfo(@Param('id') id: string) {
+    const data = await this.inventoryService.getPaymentInfo(id);
+    return { message: 'Payment info', data };
+  }
+
+  @Post(':id/change-payment-method')
+  @RequirePermission(AppModule.INVENTORY, PermissionAction.EDIT)
+  @ApiOperation({
+    summary: "Change a sold vehicle's payment method (cascades)",
+    description:
+      'Switches the sale between cash/finance/bhph/trade_in with a full cascade: creates/archives the BHPH loan, opens/archives the receivable, and re-syncs the ledger + P&L. Body: { paymentMethod, paymentStatus?, amountPaid?, bhph?: { interestRatePercent, termMonths, emiAmount } }.',
+  })
+  @ApiParam({ name: 'id', description: 'Vehicle ObjectId' })
+  async changePaymentMethod(@Param('id') id: string, @Body() dto: any, @CurrentUser() user: any) {
+    const actorName = user
+      ? `${user.firstName ?? ''} ${user.lastName ?? ''}`.trim() || undefined
+      : undefined;
+    const data = await this.inventoryService.changePaymentMethod(id, dto, actorName);
+    return { message: 'Payment method changed', data };
+  }
+
   /**
    * GET /api/v1/inventory
    */

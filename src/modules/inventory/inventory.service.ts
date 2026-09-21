@@ -273,6 +273,140 @@ export class InventoryService implements OnModuleInit {
   }
 
   /**
+   * The payment picture for a vehicle — powers the Financing/Payment panel on
+   * the car-detail page and the mark-unsold confirmation. Returns the live sale,
+   * any active BHPH loan summary, any open receivable, and the vehicle's leads
+   * (so the un-sell warning can name linked leads).
+   */
+  async getPaymentInfo(id: string): Promise<any> {
+    if (!isValidObjectId(id)) throw new BadRequestException('Invalid vehicle id');
+    const vehicle = await this.vehicleModel.findOne({ _id: id, isDeleted: false }).select('title status').lean();
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    const sale = await this.accountingService.getLiveSaleByVehicle(id);
+    const loan = await this.bhphService.getByVehicle(id);
+    const receivable = sale ? await this.accountingService.getReceivableBySale(String((sale as any)._id)) : null;
+    const leadsRaw = await this.leadModel
+      .find({ vehicle: new Types.ObjectId(id), isDeleted: false })
+      .populate('buyer', 'buyerName')
+      .select('status buyer createdAt')
+      .lean();
+    const leads = (leadsRaw as any[]).map((l) => ({
+      id: String(l._id),
+      status: l.status,
+      buyerName: l.buyer && typeof l.buyer === 'object' ? l.buyer.buyerName : undefined,
+    }));
+    return {
+      vehicleStatus: (vehicle as any).status,
+      sale: sale
+        ? {
+            _id: String((sale as any)._id),
+            paymentMethod: sale.paymentMethod,
+            paymentStatus: sale.paymentStatus,
+            salePrice: sale.salePrice,
+            discount: sale.discount,
+            amountPaid: sale.amountPaid,
+            buyerName: sale.buyerName,
+          }
+        : null,
+      loan,
+      receivable,
+      leads,
+    };
+  }
+
+  /**
+   * Change a sold car's payment method with a full cascade so P&L / ledger /
+   * BHPH all stay correct:
+   *   • → bhph:      archive any receivable, create a loan for the sale (needs a
+   *                  CRM buyer + down payment + EMI trio), stamp the sale bhph.
+   *   • bhph → other: archive the loan (interest income backed out), then set
+   *                  the sale method/status and open a receivable if still owed.
+   *   • other ↔ other / status change: update the sale, reconcile the receivable.
+   * Money rollups recompute automatically (they aggregate live sales + income +
+   * receivable-synced amountPaid).
+   */
+  async changePaymentMethod(id: string, dto: any, actorName?: string): Promise<any> {
+    if (!isValidObjectId(id)) throw new BadRequestException('Invalid vehicle id');
+    const vehicle = await this.vehicleModel.findOne({ _id: id, isDeleted: false }).lean();
+    if (!vehicle) throw new NotFoundException('Vehicle not found');
+    const sale = await this.accountingService.getLiveSaleByVehicle(id);
+    if (!sale) throw new BadRequestException('This vehicle has no recorded sale to change.');
+    const saleId = String((sale as any)._id);
+
+    const targetMethod = (dto.paymentMethod ?? sale.paymentMethod ?? 'cash').toString();
+    const net = Math.max(0, (Number(sale.salePrice) || 0) - (Number(sale.discount) || 0));
+    const wasBhph = sale.paymentMethod === 'bhph';
+    const nowBhph = targetMethod === 'bhph';
+    const title = (vehicle as any).title;
+
+    // Entering BHPH → create the financing loan for the existing sale.
+    if (!wasBhph && nowBhph) {
+      const bhph = dto.bhph ?? {};
+      const down = Math.max(0, Number(dto.amountPaid ?? dto.downPayment) || 0);
+      if (!(down > 0)) throw new BadRequestException('A down payment is required to switch to BHPH.');
+      const soldBuyer = await this.getSoldBuyer(id).catch(() => null);
+      const buyerLeadId = soldBuyer?.buyerId;
+      if (!buyerLeadId) throw new BadRequestException('Assign a CRM buyer to this car before switching to BHPH.');
+      this.bhphService.previewEmi({
+        salePrice: net, downPayment: down,
+        interestRatePercent: bhph.interestRatePercent, termMonths: bhph.termMonths, emiAmount: bhph.emiAmount,
+      });
+      await this.accountingService.archiveReceivablesForSale(saleId);
+      await this.bhphService.create({
+        saleId, vehicle: id, vehicleTitle: title, buyerLeadId,
+        leadId: soldBuyer?.leadId,
+        salePrice: net, downPayment: down,
+        interestRatePercent: bhph.interestRatePercent, termMonths: bhph.termMonths, emiAmount: bhph.emiAmount,
+        startDate: sale.saleDate,
+      });
+      // bhph.create → syncLoanFinancials already set amountPaid/status; stamp method.
+      await this.accountingService.updateSale(saleId, { paymentMethod: 'bhph' });
+      await this.activity.log({
+        module: 'accounting', action: 'payment-method-changed', entity: 'Sale', entityId: saleId,
+        label: `Payment method → BHPH · ${title}`, byName: actorName,
+      });
+      return this.getPaymentInfo(id);
+    }
+
+    // Leaving BHPH → archive the loan (keeps sale/vehicle; backs out interest).
+    if (wasBhph && !nowBhph) {
+      await this.bhphService.archiveLoansForVehicle(id);
+    }
+
+    // Non-BHPH target: set the sale + reconcile the receivable.
+    const targetStatus = (dto.paymentStatus ?? (wasBhph ? 'partial' : sale.paymentStatus) ?? 'paid').toString();
+    let amountPaid: number;
+    if (dto.amountPaid != null && dto.amountPaid !== '') amountPaid = Math.max(0, Math.min(net, Number(dto.amountPaid) || 0));
+    else if (targetStatus === 'paid') amountPaid = net;
+    else if (targetStatus === 'pending') amountPaid = 0;
+    else amountPaid = Math.max(0, Math.min(net, Number(sale.amountPaid) || 0));
+
+    await this.accountingService.updateSale(saleId, { paymentMethod: targetMethod, paymentStatus: targetStatus, amountPaid });
+
+    if (targetStatus === 'partial' || targetStatus === 'pending') {
+      const existing = await this.accountingService.getReceivableBySale(saleId);
+      if (!existing) {
+        const soldBuyer = await this.getSoldBuyer(id).catch(() => null);
+        await this.accountingService.openReceivableForSale({
+          saleId, vehicleId: id, vehicleTitle: title,
+          buyerName: sale.buyerName, buyerEmail: sale.buyerEmail,
+          buyerLeadId: soldBuyer?.buyerId, leadId: soldBuyer?.leadId,
+          paymentMethod: targetMethod, totalAmount: net, downPayment: amountPaid,
+        });
+      } else {
+        await this.accountingService.syncReceivableTotalForSale(saleId, net);
+      }
+    } else {
+      await this.accountingService.archiveReceivablesForSale(saleId);
+    }
+    await this.activity.log({
+      module: 'accounting', action: 'payment-method-changed', entity: 'Sale', entityId: saleId,
+      label: `Payment method → ${targetMethod} (${targetStatus}) · ${title}`, byName: actorName,
+    });
+    return this.getPaymentInfo(id);
+  }
+
+  /**
    * The buyer behind a sold vehicle — read from the vehicle's CLOSED lead (the
    * sale's handle). Returns { leadId, isWalkIn, buyerId, buyerName, buyerEmail }
    * so Vehicle Details can show the buyer (or "Walk-in") and assign one later.

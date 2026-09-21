@@ -632,9 +632,54 @@ export class AccountingService implements OnModuleInit {
     if (docs.length) await this.incomeModel.insertMany(docs);
   }
 
-  /** Remove all interest-income rows for a loan (loan archived/reversed). */
+  /** Remove ALL income rows for a loan (interest + any early-closure fee) when
+   *  the loan is archived/reversed. */
   async removeLoanIncome(loanId: string): Promise<void> {
-    await this.incomeModel.deleteMany({ source: 'bhph-interest', loanId: String(loanId) });
+    await this.incomeModel.deleteMany({ loanId: String(loanId) });
+  }
+
+  /**
+   * Book a one-off non-sale income row (e.g. a BHPH early-closure fee). Tagged
+   * with `loanId` so it's reversed alongside interest when the loan is archived.
+   */
+  async bookOther(opts: { loanId?: string; title: string; amount: number; date?: Date; source?: string }): Promise<void> {
+    const amount = Math.round((Number(opts.amount) || 0) * 100) / 100;
+    if (amount <= 0) return;
+    await this.incomeModel.create({
+      title: opts.title,
+      amount,
+      date: opts.date ?? new Date(),
+      category: 'other',
+      source: opts.source ?? 'other',
+      loanId: opts.loanId ? String(opts.loanId) : undefined,
+      isDeleted: false,
+    });
+  }
+
+  // ── Receivable/sale helpers for the change-payment-method orchestrator
+  //    (InventoryService can't import ReceivablesService without a cycle) ──────
+  /** The live (non-deleted) Sale doc for a vehicle, or null. */
+  async getLiveSaleByVehicle(vehicleId: string): Promise<SaleDocument | null> {
+    if (!isValidObjectId(vehicleId)) return null;
+    return this.saleModel.findOne({ vehicleId: String(vehicleId), isDeleted: false });
+  }
+  /** Live receivable for a sale (decorated with collected/outstanding), or null. */
+  async getReceivableBySale(saleId: string): Promise<any | null> {
+    return this.receivables.findBySale(saleId);
+  }
+  async archiveReceivablesForSale(saleId: string): Promise<number> {
+    return this.receivables.archiveForSale(saleId);
+  }
+  async openReceivableForSale(opts: {
+    saleId: string; vehicleId?: string; vehicleTitle?: string;
+    buyerName?: string; buyerEmail?: string; buyerPhone?: string;
+    leadId?: string; buyerLeadId?: string; paymentMethod?: string;
+    totalAmount: number; downPayment: number;
+  }): Promise<any> {
+    return this.receivables.createForSale(opts);
+  }
+  async syncReceivableTotalForSale(saleId: string, totalAmount: number): Promise<void> {
+    return this.receivables.syncTotalForSale(saleId, totalAmount);
   }
 
   /** Id of the live (non-deleted) Sale for a vehicle, or null. Used by BHPH to

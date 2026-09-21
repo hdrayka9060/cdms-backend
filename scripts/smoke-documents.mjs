@@ -29,7 +29,7 @@ const abs = (u) => (/^https?:\/\//i.test(u) ? u : ORIGIN + u);
 // 1x1 transparent PNG (valid for pdf-lib embedPng).
 const SIG_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
-const uri = (readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '.env'), 'utf8').match(/^MONGODB_URI=(.+)$/m) || [])[1]?.trim();
+const uri = (readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '.env'), 'utf8').match(/^MONGODB_URI=(.+)$/m) || [])[1]?.trim().replace(/^["']|["']$/g, '');
 const { default: mongoose } = await import('mongoose');
 await mongoose.connect(uri);
 const coll = (c) => mongoose.connection.collection(c);

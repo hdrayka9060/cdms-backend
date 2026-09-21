@@ -6,6 +6,15 @@ import { Type } from 'class-transformer';
 import { PaginationDto } from '../../../common/dto/pagination.dto';
 import { LoanStatus } from '../schemas/loan.schema';
 
+/** Close a loan: early payoff (+ optional fee) or mark defaulted. */
+export class CloseLoanDto {
+  @ApiPropertyOptional({ enum: ['payoff', 'defaulted'], description: "Omit for legacy close (status 'closed')." })
+  @IsOptional() @IsString() @IsEnum(['payoff', 'defaulted']) outcome?: 'payoff' | 'defaulted';
+  @ApiPropertyOptional({ description: "Early-closure fee booked as 'other' income (payoff only)." })
+  @IsOptional() @IsNumber() @Min(0) earlyClosureFee?: number;
+  @ApiPropertyOptional() @IsOptional() @IsString() note?: string;
+}
+
 /**
  * Create a BHPH loan. Deliberately permissive so it stays a superset of what
  * the current frontend already sends (borrower* + vehicle + principal + rate +

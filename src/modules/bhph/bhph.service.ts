@@ -236,17 +236,27 @@ export class BhphService {
       }
     }
 
-    // Waterfall the unallocated pool over remaining dues, oldest month first.
+    // Waterfall unallocated payments over remaining dues, oldest month first.
+    // Interest-bearing (normal) payments fill first; principal-only "payoff"
+    // payments (early payoff — future interest waived) fill afterward and are
+    // tracked in payoffPaid[] so they never count as collected interest.
     const paid = allocated.slice();
-    let pool = unallocated.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-    for (let i = 1; i <= n && pool > EPS; i++) {
-      const remaining = Math.max(0, rows[i - 1].emiAmount - paid[i]);
-      const fill = Math.min(pool, remaining);
-      paid[i] += fill;
-      pool -= fill;
-    }
-    // Any leftover credit lands on the final installment as an overpayment.
-    if (pool > EPS && n > 0) paid[n] += pool;
+    const payoffPaid = new Array(n + 1).fill(0); // 1-based; principal-only portion
+    const isPayoffPay = (p: any) => (p?.method ?? '') === 'payoff';
+    const fillPool = (amount: number, track: number[] | null) => {
+      let pool = amount;
+      for (let i = 1; i <= n && pool > EPS; i++) {
+        const remaining = Math.max(0, rows[i - 1].emiAmount - paid[i]);
+        const fill = Math.min(pool, remaining);
+        paid[i] += fill;
+        if (track) track[i] += fill;
+        pool -= fill;
+      }
+      // Any leftover credit lands on the final installment as an overpayment.
+      if (pool > EPS && n > 0) { paid[n] += pool; if (track) track[n] += pool; }
+    };
+    fillPool(unallocated.filter((p) => !isPayoffPay(p)).reduce((s, p) => s + (Number(p.amount) || 0), 0), null);
+    fillPool(unallocated.filter(isPayoffPay).reduce((s, p) => s + (Number(p.amount) || 0), 0), payoffPaid);
 
     let principalCollected = 0;
     let interestCollected = 0;
@@ -259,8 +269,11 @@ export class BhphService {
       const past = r.dueDate.getTime() < now.getTime();
 
       // Split what's paid on this row into interest-first, then principal
-      // (interest is earned before principal is reduced).
-      const interestPaid = Math.min(paidAmount, r.interestPart);
+      // (interest is earned before principal is reduced). A payoff payment's
+      // portion is principal-only, so exclude it from the interest-eligible base.
+      const payoffAmount = Math.round(payoffPaid[i] * 100) / 100;
+      const interestEligible = Math.max(0, paidAmount - payoffAmount);
+      const interestPaid = Math.min(interestEligible, r.interestPart);
       const principalPaid = Math.max(0, paidAmount - interestPaid);
       interestCollected += interestPaid;
       principalCollected += principalPaid;
@@ -454,12 +467,65 @@ export class BhphService {
   }
 
   /**
-   * Close a loan — early settlement / write-off. Stops reminders; the linked
-   * sale + interest income stay booked (the money was collected).
+   * Close a loan. `outcome` picks how:
+   *   - 'payoff'   — borrower settles the remaining PRINCIPAL now (future
+   *                  interest waived). Records a principal-only payoff payment
+   *                  (→ sale becomes paid), sets status paid_off, and optionally
+   *                  books an early-closure `earlyClosureFee` as 'other' income.
+   *   - 'defaulted'— borrower stopped paying; keep whatever was collected (down
+   *                  payment + payments + booked interest), just stop reminders.
+   *   - (default)  — legacy settle/write-off: status closed, sale + income kept.
+   * The linked sale + interest income are only ever backed out by `archive`.
    */
-  async close(id: string): Promise<LoanDocument> {
+  async close(id: string, dto: any = {}): Promise<LoanDocument> {
     const loan = await this.loadLoan(id);
     if (loan.status === LoanStatus.ARCHIVED) throw new BadRequestException('This loan is archived.');
+    const outcome = (dto?.outcome ?? '').toString();
+
+    if (outcome === 'defaulted') {
+      loan.status = LoanStatus.DEFAULTED;
+      loan.defaultedAt = new Date();
+      loan.nextDueAt = undefined;
+      if (dto?.note) loan.notes = `${loan.notes ? loan.notes + '\n' : ''}Defaulted: ${dto.note}`;
+      const saved = await loan.save();
+      await this.activity.log({
+        module: 'bhph', action: 'defaulted', entity: 'Loan', entityId: saved._id,
+        label: `BHPH loan marked defaulted · ${saved.borrowerName} · ${saved.vehicleTitle ?? 'vehicle'}`,
+      });
+      return saved;
+    }
+
+    if (outcome === 'payoff') {
+      const a = this.analyze(loan);
+      const remainingPrincipal = Math.max(0, Math.round((loan.principal - a.principalCollected) * 100) / 100);
+      if (remainingPrincipal > EPS) {
+        loan.payments.push(
+          this.toPayment({ amount: remainingPrincipal, method: 'payoff', notes: dto?.note || 'Early payoff (remaining principal)' }),
+        );
+      }
+      // Re-sync the sale (→ paid) + income; the payoff payment books no interest.
+      await this.recomputeAndSave(loan);
+      loan.status = LoanStatus.PAID_OFF;
+      loan.nextDueAt = undefined;
+      const saved = await loan.save();
+      const fee = Math.max(0, Number(dto?.earlyClosureFee) || 0);
+      if (fee > 0) {
+        await this.accounting
+          .bookOther({
+            loanId: String(saved._id),
+            title: `Early closure fee · ${saved.borrowerName || 'Borrower'}`,
+            amount: fee,
+            source: 'bhph-early-closure-fee',
+          })
+          .catch((err) => this.logger.error(`early-closure fee booking failed: ${err instanceof Error ? err.message : err}`));
+      }
+      await this.activity.log({
+        module: 'bhph', action: 'paid_off', entity: 'Loan', entityId: saved._id,
+        label: `BHPH loan paid off early · ${saved.borrowerName} · ${saved.vehicleTitle ?? 'vehicle'}${fee > 0 ? ` (+$${fee.toLocaleString()} fee)` : ''}`,
+      });
+      return saved;
+    }
+
     loan.status = LoanStatus.CLOSED;
     loan.nextDueAt = undefined;
     const saved = await loan.save();
@@ -660,13 +726,17 @@ export class BhphService {
       add(String(p._id), applyTo(Number(p.installmentNo) - 1, Number(p.amount) || 0));
     }
     for (const p of payments.filter((x) => !isAlloc(x)).sort(byDate)) {
+      const isPayoff = (p?.method ?? '') === 'payoff';
       let remain = Number(p.amount) || 0;
       let acc = 0;
       for (let i = 0; i < n && remain > EPS; i++) {
         const cap = rows[i].emiAmount - filled[i];
         if (cap <= EPS) continue;
         const applied = Math.min(remain, cap);
-        acc += applyTo(i, applied);
+        // Payoff = principal-only: consume the installment's capacity so later
+        // payments see the right remaining, but book zero interest on it.
+        if (isPayoff) filled[i] += applied;
+        else acc += applyTo(i, applied);
         remain -= applied;
       }
       add(String(p._id), acc);
@@ -707,10 +777,44 @@ export class BhphService {
         principalCollected: a.principalCollected,
         interestCollected: a.interestCollected,
         outstanding: Math.max(0, Math.round((a.totalScheduled - a.totalPaid) * 100) / 100),
+        outstandingPrincipal: Math.max(0, Math.round((loan.principal - a.principalCollected) * 100) / 100),
         nextDueAt: a.nextDueAt,
         overdueCount: a.overdueCount,
         status: loan.status,
       },
+    };
+  }
+
+  /**
+   * Compact loan summary for a vehicle's active (non-archived) loan — powers the
+   * Financing panel on the Inventory car-detail page. Null when the car has no
+   * live loan. Includes `outstandingPrincipal` (the early-payoff amount).
+   */
+  async getByVehicle(vehicleId: string): Promise<any | null> {
+    if (!isValidObjectId(vehicleId)) return null;
+    const loan = await this.model
+      .findOne({ vehicle: vehicleId, isDeleted: false, status: { $ne: LoanStatus.ARCHIVED } })
+      .sort({ createdAt: -1 });
+    if (!loan) return null;
+    const a = this.analyze(loan);
+    return {
+      _id: String(loan._id),
+      status: loan.status,
+      borrowerName: loan.borrowerName,
+      vehicleTitle: loan.vehicleTitle,
+      salePrice: loan.salePrice,
+      downPayment: loan.downPayment,
+      principal: loan.principal,
+      interestRatePercent: loan.interestRatePercent,
+      termMonths: loan.termMonths,
+      emiAmount: loan.emiAmount,
+      totalPaid: a.totalPaid,
+      totalScheduled: a.totalScheduled,
+      outstanding: Math.max(0, Math.round((a.totalScheduled - a.totalPaid) * 100) / 100),
+      outstandingPrincipal: Math.max(0, Math.round((loan.principal - a.principalCollected) * 100) / 100),
+      nextDueAt: a.nextDueAt,
+      overdueCount: a.overdueCount,
+      saleId: loan.saleId,
     };
   }
 
